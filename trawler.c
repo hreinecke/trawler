@@ -36,7 +36,6 @@ static int stopped;
 
 int insert_event(char *dirname, time_t dtime)
 {
-	struct tm dtm;
 	struct event_file *tmp_ef, *d_ef = NULL, *new_ef;
 	struct event_entry *tmp_ev, *d_ev = NULL, *last_ev = NULL;
 	char *ptr;
@@ -52,11 +51,6 @@ int insert_event(char *dirname, time_t dtime)
 	if (ptr)
 		*ptr = '\0';
 
-	if (!gmtime_r(&dtime, &dtm)) {
-		fprintf(stderr, "%s: Cannot convert time, error %d\n",
-			dirname, errno);
-		return -errno;
-	}
 	list_for_each_entry(tmp_ev, &event_list, ee_next) {
 		if (difftime(tmp_ev->ee_time, dtime) > 0)
 			continue;
