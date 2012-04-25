@@ -26,11 +26,10 @@ struct event_entry {
 LIST_HEAD(event_list);
 
 static int stopped;
-static int inotify_q_size = 32;
 
 int trawl_dir(char *dirname, int inotify_fd)
 {
-	int num_files = 0;
+	int num_files = 0, inotify_wd;
 	char fullpath[PATH_MAX];
 	struct stat dirst;
 	struct tm dtm;
@@ -88,6 +87,13 @@ int trawl_dir(char *dirname, int inotify_fd)
 		list_add(&ev_file->ef_next, &d_ev->ee_entries);
 		return 1;
 	}
+	inotify_wd = inotify_add_watch(inotify_fd, dirname, IN_ALL_EVENTS);
+	if (inotify_wd < 0) {
+		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
+			dirname, errno);
+		return 0;
+	}
+	printf("%s: added inotify watch %d\n", dirname, inotify_wd);
 	dirfd = opendir(dirname);
 	if (!dirfd) {
 		fprintf(stderr, "Cannot open directory %s: error %d\n",
@@ -121,12 +127,11 @@ void * watch_dir(void * arg)
 	struct timeval tmo;
 	char buf[BUF_LEN];
 
-	FD_ZERO(&rfd);
-	FD_SET(inotify_fd, &rfd);
-
 	while (!stopped) {
 		int rlen, ret, i = 0;
 
+		FD_ZERO(&rfd);
+		FD_SET(inotify_fd, &rfd);
 		tmo.tv_sec = 5;
 		tmo.tv_usec = 0;
 		ret = select(inotify_fd + 1, &rfd, NULL, NULL, &tmo);
@@ -222,7 +227,7 @@ void list_events(void)
 
 int main(int argc, char **argv)
 {
-	int i, num_files, inotify_fd, inotify_wd;
+	int i, num_files, inotify_fd;
 	char init_dir[PATH_MAX];
 
 	while ((i = getopt(argc, argv, "d:")) != -1) {
@@ -270,15 +275,7 @@ int main(int argc, char **argv)
 	list_events();
 
 	printf("Starting inotify\n");
-	inotify_wd = inotify_add_watch(inotify_fd, init_dir, IN_ALL_EVENTS);
-	if (inotify_wd < 0) {
-		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
-			init_dir, errno);
-		return 0;
-	}
-	printf("%s: added inotify watch\n", init_dir);
 	watch_dir(&inotify_fd);
-	inotify_rm_watch(inotify_fd, inotify_wd);
 
 	return 0;
 }
