@@ -88,14 +88,6 @@ int trawl_dir(char *dirname, int inotify_fd)
 		list_add(&ev_file->ef_next, &d_ev->ee_entries);
 		return 1;
 	}
-	if (inotify_add_watch(inotify_fd, dirname,
-			      IN_MOVE | IN_CREATE | IN_DELETE |
-			      IN_DELETE_SELF | IN_MOVE_SELF) < 0) {
-		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
-			dirname, errno);
-		return 0;
-	}
-	printf("%s: added inotify watch\n", dirname);
 	dirfd = opendir(dirname);
 	if (!dirfd) {
 		fprintf(stderr, "Cannot open directory %s: error %d\n",
@@ -119,23 +111,24 @@ int trawl_dir(char *dirname, int inotify_fd)
 	return num_files;
 }
 
+#define EVENT_SIZE (sizeof(struct inotify_event))
+#define BUF_LEN (1024 * (EVENT_SIZE + 16))
+
 void * watch_dir(void * arg)
 {
 	int inotify_fd = *(int *)arg;
 	fd_set rfd;
 	struct timeval tmo;
-	struct inotify_event *in_ev;
+	char buf[BUF_LEN];
 
 	FD_ZERO(&rfd);
 	FD_SET(inotify_fd, &rfd);
-	tmo.tv_sec = 5;
-	tmo.tv_usec = 0;
-	in_ev = malloc(sizeof(struct inotify_event) * inotify_q_size);
 
 	while (!stopped) {
-		int rlen, ret, i;
-		char *ev_name = "<unknown>";
+		int rlen, ret, i = 0;
 
+		tmo.tv_sec = 5;
+		tmo.tv_usec = 0;
 		ret = select(inotify_fd + 1, &rfd, NULL, NULL, &tmo);
 		if (ret < 0) {
 			if (ret == EINTR)
@@ -143,30 +136,60 @@ void * watch_dir(void * arg)
 			fprintf(stderr,"select returned %d\n", errno);
 			break;
 		}
-		if (ret == 0)
+		if (ret == 0) {
+			fprintf(stderr, "select timeout\n");
 			continue;
-		rlen = read(inotify_fd, in_ev,
-			    sizeof(struct inotify_event) * inotify_q_size);
-		printf("inotify_event: %d/%ld bytes\n",
-		       rlen, rlen / sizeof(struct inotify_event));
-		for (i = 0; i < rlen / sizeof(struct inotify_event); i++) {
-			if (in_ev[i].len) {
-				ev_name = in_ev[i].name;
+		}
+		if (!FD_ISSET(inotify_fd, &rfd)) {
+			fprintf(stderr, "select returned for invalid fd\n");
+			continue;
+		}
+
+		rlen = read(inotify_fd, buf, BUF_LEN);
+		while (i < rlen) {
+			struct inotify_event *in_ev;
+			const char *type;
+
+			in_ev = (struct inotify_event *)&(buf[i]);
+
+			if (!in_ev->len) {
+				i += EVENT_SIZE + in_ev->len;
+				continue;
 			}
-			if (in_ev[i].mask & IN_IGNORED) {
-				printf("inotify event %d removed\n",
-				       in_ev[i].wd);
-			} else if (in_ev[i].mask & IN_Q_OVERFLOW) {
-				printf("inotify event %d: queue overflow\n",
-				       in_ev[i].wd);
+			if (in_ev->mask & IN_ISDIR) {
+				type = "Directory";
 			} else {
-				printf("inotify event %d for %s: %x\n",
-				       in_ev[i].wd, ev_name,
-				       in_ev[i].mask & ~IN_EXCL_UNLINK);
+				type = "File";
 			}
+			if (in_ev->mask & IN_IGNORED) {
+				printf("inotify event %d removed\n",
+				       in_ev->wd);
+			} else if (in_ev->mask & IN_Q_OVERFLOW) {
+				printf("inotify event %d: queue overflow\n",
+				       in_ev->wd);
+			} else {
+				printf("event %d: %s %x\n",
+				       in_ev->wd, in_ev->name, in_ev->mask);
+				if (in_ev->mask & IN_CREATE)
+					printf("\tcreated %s %s\n",
+					       type, in_ev->name);
+				if (in_ev->mask & IN_DELETE)
+					printf("\tdeleted %s %s\n",
+					       type, in_ev->name);
+				if (in_ev->mask & IN_MODIFY)
+					printf("\tmodified %s %s\n",
+					       type, in_ev->name);
+				if (in_ev->mask & IN_OPEN)
+					printf("\topened %s %s\n",
+					       type, in_ev->name);
+				if (in_ev->mask & IN_CLOSE)
+					printf("\tclosed %s %s\n",
+					       type, in_ev->name);
+			}
+			i += EVENT_SIZE + in_ev->len;
 		}
 	}
-	free(in_ev);
+
 	return NULL;
 }
 
@@ -203,7 +226,7 @@ void list_events(void)
 
 int main(int argc, char **argv)
 {
-	int i, num_files, inotify_fd;
+	int i, num_files, inotify_fd, inotify_wd;
 	char init_dir[PATH_MAX];
 
 	while ((i = getopt(argc, argv, "d:")) != -1) {
@@ -249,7 +272,15 @@ int main(int argc, char **argv)
 	printf("Scanned %d files\n", num_files);
 
 	printf("Starting inotify\n");
+	inotify_wd = inotify_add_watch(inotify_fd, init_dir, IN_ALL_EVENTS);
+	if (inotify_wd < 0) {
+		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
+			init_dir, errno);
+		return 0;
+	}
+	printf("%s: added inotify watch\n", init_dir);
 	watch_dir(&inotify_fd);
+	inotify_rm_watch(inotify_fd, inotify_wd);
 
 	return 0;
 }
