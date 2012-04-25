@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <errno.h>
+#include <search.h>
 #include "list.h"
 
 struct event_file {
@@ -23,13 +24,64 @@ struct event_entry {
 	time_t ee_time;
 };
 
+struct event_watch {
+	int ew_wd;
+	char ew_path[PATH_MAX];
+};
+
 LIST_HEAD(event_list);
+void *watch_tree = NULL;
 
 static int stopped;
 
+int compare_watch(const void *a, const void *b)
+{
+	const struct event_watch *ew1 = a, *ew2 = b;
+
+	if (ew1->ew_wd < ew2->ew_wd)
+		return -1;
+	if (ew1->ew_wd > ew2->ew_wd)
+		return 1;
+	return 0;
+}
+
+int insert_inotify(char *dirname, int inotify_fd)
+{
+	struct event_watch *ew;
+	void *val;
+
+	ew = malloc(sizeof(struct event_watch));
+	if (!ew) {
+		fprintf(stderr, "%s: cannot allocate watch entry\n", dirname);
+		return -ENOMEM;
+	}
+	ew->ew_wd = inotify_add_watch(inotify_fd, dirname, IN_ALL_EVENTS);
+	if (ew->ew_wd < 0) {
+		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
+			dirname, errno);
+		free(ew);
+		return -errno;
+	}
+	strcpy(ew->ew_path, dirname);
+	val = tsearch((void *)ew, &watch_tree, compare_watch);
+	if (!val) {
+		fprintf(stderr, "%s: Failed to insert watch entry\n", dirname);
+		inotify_rm_watch(inotify_fd, ew->ew_wd);
+		free(ew);
+		return -ENOMEM;
+	} else if ((*(struct event_watch **) val) != ew) {
+		fprintf(stderr, "%s: watch %d already present\n", dirname,
+			ew->ew_wd);
+		free(ew);
+		return -EEXIST;
+	}
+	printf("%s: added inotify watch %d\n", dirname, ew->ew_wd);
+	return 0;
+}
+
 int trawl_dir(char *dirname, int inotify_fd)
 {
-	int num_files = 0, inotify_wd;
+	int num_files = 0;
 	char fullpath[PATH_MAX];
 	struct stat dirst;
 	struct tm dtm;
@@ -87,13 +139,9 @@ int trawl_dir(char *dirname, int inotify_fd)
 		list_add(&ev_file->ef_next, &d_ev->ee_entries);
 		return 1;
 	}
-	inotify_wd = inotify_add_watch(inotify_fd, dirname, IN_ALL_EVENTS);
-	if (inotify_wd < 0) {
-		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
-			dirname, errno);
+	if (insert_inotify(dirname, inotify_fd) < 0)
 		return 0;
-	}
-	printf("%s: added inotify watch %d\n", dirname, inotify_wd);
+
 	dirfd = opendir(dirname);
 	if (!dirfd) {
 		fprintf(stderr, "Cannot open directory %s: error %d\n",
@@ -154,17 +202,27 @@ void * watch_dir(void * arg)
 		while (i < rlen) {
 			struct inotify_event *in_ev;
 			const char *type;
+			void *val;
+			struct event_watch ew, *found_ew;
 
 			in_ev = (struct inotify_event *)&(buf[i]);
 
-			if (!in_ev->len) {
-				i += EVENT_SIZE + in_ev->len;
-				continue;
+			if (!in_ev->len)
+				goto next;
+
+			ew.ew_wd = in_ev->wd;
+			val = tfind((void *)&ew, &watch_tree,
+					 compare_watch);
+			if (!val) {
+				fprintf(stderr, "inotify event %d not found "
+					"in tree", in_ev->wd);
+				goto next;
 			}
+			found_ew = *(struct event_watch **)val;
 			if (in_ev->mask & IN_ISDIR) {
-				type = "Directory";
+				type = "dir";
 			} else {
-				type = "File";
+				type = "file";
 			}
 			if (in_ev->mask & IN_IGNORED) {
 				printf("inotify event %d removed\n",
@@ -173,24 +231,26 @@ void * watch_dir(void * arg)
 				printf("inotify event %d: queue overflow\n",
 				       in_ev->wd);
 			} else {
-				printf("event %d: %s %x\n",
-				       in_ev->wd, in_ev->name, in_ev->mask);
+				const char *op;
+
+				printf("event %d: %x\n",
+				       in_ev->wd, in_ev->mask);
 				if (in_ev->mask & IN_CREATE)
-					printf("\tcreated %s %s\n",
-					       type, in_ev->name);
-				if (in_ev->mask & IN_DELETE)
-					printf("\tdeleted %s %s\n",
-					       type, in_ev->name);
-				if (in_ev->mask & IN_MODIFY)
-					printf("\tmodified %s %s\n",
-					       type, in_ev->name);
-				if (in_ev->mask & IN_OPEN)
-					printf("\topened %s %s\n",
-					       type, in_ev->name);
-				if (in_ev->mask & IN_CLOSE)
-					printf("\tclosed %s %s\n",
-					       type, in_ev->name);
+					op = "created";
+				else if (in_ev->mask & IN_DELETE)
+					op = "deleted";
+				else if (in_ev->mask & IN_MODIFY)
+					op = "modified";
+				else if (in_ev->mask & IN_OPEN)
+					op = "opened";
+				else if (in_ev->mask & IN_CLOSE)
+					op = "closed";
+				else
+					op = "<unhandled>";
+				printf("\t%s %s %s/%s\n", op, type,
+				       found_ew->ew_path, in_ev->name);
 			}
+		next:
 			i += EVENT_SIZE + in_ev->len;
 		}
 	}
