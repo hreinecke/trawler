@@ -34,6 +34,48 @@ void *watch_tree = NULL;
 
 static int stopped;
 
+int insert_event(char *dirname, time_t dtime)
+{
+	struct tm dtm;
+	struct event_file *ev_file;
+	struct event_entry *tmp_ev, *d_ev = NULL, *last_ev = NULL;
+
+	ev_file = malloc(sizeof(struct event_file));
+	if (!ev_file) {
+		fprintf(stderr, "%s: Cannot allocate memory, error %d\n",
+			dirname, errno);
+		return -errno;
+	}
+	strcpy(ev_file->ef_path, dirname);
+
+	if (!gmtime_r(&dtime, &dtm)) {
+		fprintf(stderr, "%s: Cannot convert time, error %d\n",
+			dirname, errno);
+		return -errno;
+	}
+	list_for_each_entry(tmp_ev, &event_list, ee_next) {
+		if (difftime(tmp_ev->ee_time, dtime) > 0)
+			continue;
+		if (tmp_ev->ee_time == dtime) {
+			d_ev = tmp_ev;
+			break;
+		}
+		last_ev = tmp_ev;
+	}
+	if (!d_ev) {
+		d_ev = malloc(sizeof(struct event_entry));
+		INIT_LIST_HEAD(&d_ev->ee_next);
+		INIT_LIST_HEAD(&d_ev->ee_entries);
+		d_ev->ee_time = dtime;
+		if (last_ev)
+			list_add(&d_ev->ee_next, &last_ev->ee_next);
+		else
+			list_add(&d_ev->ee_next, &event_list);
+	}
+	list_add(&ev_file->ef_next, &d_ev->ee_entries);
+	return 0;
+}
+
 int compare_watch(const void *a, const void *b)
 {
 	const struct event_watch *ew1 = a, *ew2 = b;
@@ -84,7 +126,6 @@ int trawl_dir(char *dirname, int inotify_fd)
 	int num_files = 0;
 	char fullpath[PATH_MAX];
 	struct stat dirst;
-	struct tm dtm;
 	time_t dtime;
 	DIR *dirfd;
 	struct dirent *dirent;
@@ -99,45 +140,12 @@ int trawl_dir(char *dirname, int inotify_fd)
 	} else {
 		dtime = dirst.st_mtime;
 	}
-	if (!gmtime_r(&dtime, &dtm)) {
-		fprintf(stderr, "%s: Cannot convert time, error %d\n",
-			dirname, errno);
-		return 0;
-	}
 
 	if (!S_ISDIR(dirst.st_mode)) {
-		struct event_file *ev_file;
-		struct event_entry *tmp_ev, *d_ev = NULL, *last_ev = NULL;
-
-		ev_file = malloc(sizeof(struct event_file));
-		if (!ev_file) {
-			fprintf(stderr, "%s: Cannot allocate memory, error %d\n",
-				dirname, errno);
+		if (insert_event(dirname, dtime) < 0)
 			return 0;
-		}
-		strcpy(ev_file->ef_path, dirname);
-
-		list_for_each_entry(tmp_ev, &event_list, ee_next) {
-			if (difftime(tmp_ev->ee_time, dtime) > 0)
-				continue;
-			if (tmp_ev->ee_time == dtime) {
-				d_ev = tmp_ev;
-				break;
-			}
-			last_ev = tmp_ev;
-		}
-		if (!d_ev) {
-			d_ev = malloc(sizeof(struct event_entry));
-			INIT_LIST_HEAD(&d_ev->ee_next);
-			INIT_LIST_HEAD(&d_ev->ee_entries);
-			d_ev->ee_time = dtime;
-			if (last_ev)
-				list_add(&d_ev->ee_next, &last_ev->ee_next);
-			else
-				list_add(&d_ev->ee_next, &event_list);
-		}
-		list_add(&ev_file->ef_next, &d_ev->ee_entries);
-		return 1;
+		else
+			return 1;
 	}
 	if (insert_inotify(dirname, inotify_fd) < 0)
 		return 0;
@@ -245,6 +253,8 @@ void * watch_dir(void * arg)
 					op = "opened";
 				else if (in_ev->mask & IN_CLOSE)
 					op = "closed";
+				else if (in_ev->mask & IN_MOVE)
+					op = "moved";
 				else
 					op = "<unhandled>";
 				printf("\t%s %s %s/%s\n", op, type,
