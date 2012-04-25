@@ -206,17 +206,13 @@ void list_events(void)
 				tmp_ef->ef_path, errno);
 			continue;
 		}
-#if 0
 		printf("%04d%02d%02d-%02d%02d%02d:\n",
 		       dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
 		       dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
-#endif
 		num_files = 0;
 		list_for_each_entry(tmp_ef, &tmp_ee->ee_entries, ef_next) {
 			num_files++;
-#if 0
 			printf("\t%s\n", tmp_ef->ef_path);
-#endif
 		}
 		printf("%04d%02d%02d-%02d%02d%02d: %d entries\n",
 		       dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
@@ -270,6 +266,8 @@ int main(int argc, char **argv)
 	printf("Starting at '%s'\n", init_dir);
 	num_files = trawl_dir(init_dir, inotify_fd);
 	printf("Scanned %d files\n", num_files);
+
+	list_events();
 
 	printf("Starting inotify\n");
 	inotify_wd = inotify_add_watch(inotify_fd, init_dir, IN_ALL_EVENTS);
