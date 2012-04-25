@@ -144,7 +144,7 @@ int trawl_dir(char *dirname)
 		else
 			return 1;
 	}
-	if (insert_inotify(dirname) < 0)
+	if (insert_inotify(dirname, 0) < 0)
 		return 0;
 
 	dirfd = opendir(dirname);

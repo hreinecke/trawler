@@ -28,6 +28,7 @@ void *watch_tree = NULL;
 static int stopped;
 pthread_t watcher_thr;
 int inotify_fd;
+pthread_mutex_t tree_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int compare_wd(const void *a, const void *b)
 {
@@ -52,10 +53,12 @@ void free_watch(void *p)
 	struct event_watch *ew = p;
 
 	inotify_rm_watch(inotify_fd, ew->ew_wd);
+	printf("%s: removed inotify watch %d\n",
+	       ew->ew_path, ew->ew_wd);
 	free(ew);
 }
 
-int insert_inotify(char *dirname)
+int insert_inotify(char *dirname, int locked)
 {
 	struct event_watch *ew;
 	void *val;
@@ -73,7 +76,11 @@ int insert_inotify(char *dirname)
 		return -errno;
 	}
 	strcpy(ew->ew_path, dirname);
+	if (!locked)
+		pthread_mutex_lock(&tree_mutex);
 	val = tsearch((void *)ew, &watch_tree, compare_wd);
+	if (!locked)
+		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
 		fprintf(stderr, "%s: Failed to insert watch entry\n", dirname);
 		inotify_rm_watch(inotify_fd, ew->ew_wd);
@@ -89,19 +96,27 @@ int insert_inotify(char *dirname)
 	return 0;
 }
 
-int remove_inotify(char *dirname)
+int remove_inotify(char *dirname, int locked)
 {
 	void *val;
 	struct event_watch ew, *found_ew;
 
 	strcpy(ew.ew_path, dirname);
+	if (!locked)
+		pthread_mutex_lock(&tree_mutex);
 	val = tfind((void *)&ew, &watch_tree, compare_path);
+	if (!locked)
+		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
 		fprintf(stderr, "%s: watch entry not found in tree", dirname);
 		return -EINVAL;
 	}
 	found_ew = *(struct event_watch **)val;
+	if (!locked)
+		pthread_mutex_lock(&tree_mutex);
 	val = tdelete((void *)found_ew, &watch_tree, compare_wd);
+	if (!locked)
+		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
 		fprintf(stderr, "%s: failed to remove in watch entry",
 			dirname);
@@ -117,6 +132,11 @@ int remove_inotify(char *dirname)
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (1024 * (EVENT_SIZE + 16))
+
+void release_tree_lock(void *arg)
+{
+	pthread_mutex_unlock(&tree_mutex);
+}
 
 void * watch_dir(void * arg)
 {
@@ -163,8 +183,11 @@ void * watch_dir(void * arg)
 				goto next;
 
 			ew.ew_wd = in_ev->wd;
+			pthread_cleanup_push(release_tree_lock, NULL);
+			pthread_mutex_lock(&tree_mutex);
 			val = tfind((void *)&ew, &watch_tree,
 					 compare_wd);
+			pthread_cleanup_pop(1);
 			if (!val) {
 				fprintf(stderr, "inotify event %d not found "
 					"in tree", in_ev->wd);
@@ -205,12 +228,15 @@ void * watch_dir(void * arg)
 			sprintf(path, "%s/%s", found_ew->ew_path, in_ev->name);
 			printf("\t%s %s %s\n", op, type, path);
 			if (in_ev->mask & IN_ISDIR) {
+				pthread_cleanup_push(release_tree_lock, NULL);
+				pthread_mutex_lock(&tree_mutex);
 				if ((in_ev->mask & IN_DELETE) ||
 				    (in_ev->mask & IN_MOVED_FROM))
-					remove_inotify(path);
+					remove_inotify(path, 1);
 				if ((in_ev->mask & IN_CREATE) ||
 				    (in_ev->mask & IN_MOVED_TO))
-					insert_inotify(path);
+					insert_inotify(path, 1);
+				pthread_cleanup_pop(1);
 			}
 		next:
 			i += EVENT_SIZE + in_ev->len;
@@ -248,6 +274,8 @@ int stop_watcher(void)
 	pthread_cancel(watcher_thr);
 	pthread_join(watcher_thr, NULL);
 	printf("Stopped inotify watcher\n");
+	pthread_mutex_lock(&tree_mutex);
 	tdestroy(watch_tree, free_watch);
+	pthread_mutex_unlock(&tree_mutex);
 	return 0;
 }
