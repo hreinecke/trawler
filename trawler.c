@@ -1,3 +1,9 @@
+/*
+ * trawler.c
+ *
+ * Main routine for trawler.
+ * Copyright (c) 2012 Hannes Reinecke <hare@suse.de>
+ */
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -10,8 +16,10 @@
 #include <stddef.h>
 #include <string.h>
 #include <errno.h>
-#include <search.h>
+#include <signal.h>
+#include <pthread.h>
 #include "list.h"
+#include "watcher.h"
 
 struct event_file {
 	struct list_head ef_next;
@@ -24,15 +32,35 @@ struct event_entry {
 	time_t ee_time;
 };
 
-struct event_watch {
-	int ew_wd;
-	char ew_path[PATH_MAX];
-};
-
 LIST_HEAD(event_list);
-void *watch_tree = NULL;
+pthread_cond_t exit_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t exit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int stopped;
+static void *
+signal_set(int signo, void (*func) (int))
+{
+	int r;
+	struct sigaction sig;
+	struct sigaction osig;
+
+	sig.sa_handler = func;
+	sigemptyset(&sig.sa_mask);
+	sig.sa_flags = 0;
+
+	r = sigaction(signo, &sig, &osig);
+
+	if (r < 0)
+		return (SIG_ERR);
+	else
+		return (osig.sa_handler);
+}
+
+static void sigend(int sig)
+{
+	pthread_mutex_lock(&exit_mutex);
+	pthread_cond_signal(&exit_cond);
+	pthread_mutex_unlock(&exit_mutex);
+}
 
 int insert_event(char *dirname, time_t dtime)
 {
@@ -90,85 +118,7 @@ int insert_event(char *dirname, time_t dtime)
 	return 0;
 }
 
-int compare_wd(const void *a, const void *b)
-{
-	const struct event_watch *ew1 = a, *ew2 = b;
-
-	if (ew1->ew_wd < ew2->ew_wd)
-		return -1;
-	if (ew1->ew_wd > ew2->ew_wd)
-		return 1;
-	return 0;
-}
-
-int compare_path(const void *a, const void *b)
-{
-	const struct event_watch *ew1 = a, *ew2 = b;
-
-	return strcmp(ew1->ew_path, ew2->ew_path);
-}
-
-int insert_inotify(char *dirname, int inotify_fd)
-{
-	struct event_watch *ew;
-	void *val;
-
-	ew = malloc(sizeof(struct event_watch));
-	if (!ew) {
-		fprintf(stderr, "%s: cannot allocate watch entry\n", dirname);
-		return -ENOMEM;
-	}
-	ew->ew_wd = inotify_add_watch(inotify_fd, dirname, IN_ALL_EVENTS);
-	if (ew->ew_wd < 0) {
-		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
-			dirname, errno);
-		free(ew);
-		return -errno;
-	}
-	strcpy(ew->ew_path, dirname);
-	val = tsearch((void *)ew, &watch_tree, compare_wd);
-	if (!val) {
-		fprintf(stderr, "%s: Failed to insert watch entry\n", dirname);
-		inotify_rm_watch(inotify_fd, ew->ew_wd);
-		free(ew);
-		return -ENOMEM;
-	} else if ((*(struct event_watch **) val) != ew) {
-		fprintf(stderr, "%s: watch %d already present\n", dirname,
-			ew->ew_wd);
-		free(ew);
-		return -EEXIST;
-	}
-	printf("%s: added inotify watch %d\n", ew->ew_path, ew->ew_wd);
-	return 0;
-}
-
-int remove_inotify(char *dirname, int inotify_fd)
-{
-	void *val;
-	struct event_watch ew, *found_ew;
-
-	strcpy(ew.ew_path, dirname);
-	val = tfind((void *)&ew, &watch_tree, compare_path);
-	if (!val) {
-		fprintf(stderr, "%s: watch entry not found in tree", dirname);
-		return -EINVAL;
-	}
-	found_ew = *(struct event_watch **)val;
-	val = tdelete((void *)found_ew, &watch_tree, compare_wd);
-	if (!val) {
-		fprintf(stderr, "%s: failed to remove in watch entry",
-			dirname);
-		return -EINVAL;
-	}
-	inotify_rm_watch(inotify_fd, found_ew->ew_wd);
-	printf("%s: removed inotify watch %d\n",
-	       found_ew->ew_path, found_ew->ew_wd);
-	free(found_ew);
-
-	return 0;
-}
-
-int trawl_dir(char *dirname, int inotify_fd)
+int trawl_dir(char *dirname)
 {
 	int num_files = 0;
 	char fullpath[PATH_MAX];
@@ -194,7 +144,7 @@ int trawl_dir(char *dirname, int inotify_fd)
 		else
 			return 1;
 	}
-	if (insert_inotify(dirname, inotify_fd) < 0)
+	if (insert_inotify(dirname) < 0)
 		return 0;
 
 	dirfd = opendir(dirname);
@@ -214,115 +164,10 @@ int trawl_dir(char *dirname, int inotify_fd)
 				dirname, dirent->d_name);
 		}
 		if ((dirent->d_type & DT_REG) || (dirent->d_type & DT_DIR))
-			num_files += trawl_dir(fullpath, inotify_fd);
+			num_files += trawl_dir(fullpath);
 	}
 	closedir(dirfd);
 	return num_files;
-}
-
-#define EVENT_SIZE (sizeof(struct inotify_event))
-#define BUF_LEN (1024 * (EVENT_SIZE + 16))
-
-void * watch_dir(void * arg)
-{
-	int inotify_fd = *(int *)arg;
-	fd_set rfd;
-	struct timeval tmo;
-	char buf[BUF_LEN];
-
-	while (!stopped) {
-		int rlen, ret, i = 0;
-
-		FD_ZERO(&rfd);
-		FD_SET(inotify_fd, &rfd);
-		tmo.tv_sec = 5;
-		tmo.tv_usec = 0;
-		ret = select(inotify_fd + 1, &rfd, NULL, NULL, &tmo);
-		if (ret < 0) {
-			if (ret == EINTR)
-				continue;
-			fprintf(stderr,"select returned %d\n", errno);
-			break;
-		}
-		if (ret == 0) {
-			fprintf(stderr, "select timeout\n");
-			continue;
-		}
-		if (!FD_ISSET(inotify_fd, &rfd)) {
-			fprintf(stderr, "select returned for invalid fd\n");
-			continue;
-		}
-
-		rlen = read(inotify_fd, buf, BUF_LEN);
-		while (i < rlen) {
-			struct inotify_event *in_ev;
-			const char *type;
-			void *val;
-			struct event_watch ew, *found_ew;
-			const char *op;
-			char path[PATH_MAX];
-
-			in_ev = (struct inotify_event *)&(buf[i]);
-
-			if (!in_ev->len)
-				goto next;
-
-			ew.ew_wd = in_ev->wd;
-			val = tfind((void *)&ew, &watch_tree,
-					 compare_wd);
-			if (!val) {
-				fprintf(stderr, "inotify event %d not found "
-					"in tree", in_ev->wd);
-				goto next;
-			}
-			found_ew = *(struct event_watch **)val;
-			if (in_ev->mask & IN_ISDIR) {
-				type = "dir";
-			} else {
-				type = "file";
-			}
-			if (in_ev->mask & IN_IGNORED) {
-				printf("inotify event %d removed\n",
-				       in_ev->wd);
-				goto next;
-			}
-			if (in_ev->mask & IN_Q_OVERFLOW) {
-				printf("inotify event %d: queue overflow\n",
-				       in_ev->wd);
-				goto next;
-			}
-			printf("event %d: %x\n",
-			       in_ev->wd, in_ev->mask);
-			if (in_ev->mask & IN_CREATE)
-				op = "created";
-			else if (in_ev->mask & IN_DELETE)
-				op = "deleted";
-			else if (in_ev->mask & IN_MODIFY)
-				op = "modified";
-			else if (in_ev->mask & IN_OPEN)
-				op = "opened";
-			else if (in_ev->mask & IN_CLOSE)
-				op = "closed";
-			else if (in_ev->mask & IN_MOVE)
-				op = "moved";
-			else
-				op = "<unhandled>";
-			sprintf(path, "%s/%s", found_ew->ew_path, in_ev->name);
-			printf("\t%s %s %s\n", op, type, path);
-			if (in_ev->mask & IN_ISDIR) {
-				if ((in_ev->mask & IN_DELETE) ||
-				    (in_ev->mask & IN_MOVED_FROM))
-					remove_inotify(path, inotify_fd);
-				if ((in_ev->mask & IN_CREATE) ||
-				    (in_ev->mask & IN_MOVED_TO))
-					insert_inotify(path, inotify_fd);
-			}
-		next:
-			i += EVENT_SIZE + in_ev->len;
-		}
-	}
-
-	return NULL;
 }
 
 void list_events(void)
@@ -354,7 +199,7 @@ void list_events(void)
 
 int main(int argc, char **argv)
 {
-	int i, num_files, inotify_fd;
+	int i, num_files;
 	char init_dir[PATH_MAX];
 
 	while ((i = getopt(argc, argv, "d:")) != -1) {
@@ -388,21 +233,20 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to get current working directory\n");
 		return errno;
 	}
-	inotify_fd = inotify_init();
-	if (inotify_fd < 0) {
-		fprintf(stderr, "Failed to initialize inotify, error %d\n",
-			errno);
-		return errno;
-	}
+
+	signal_set(SIGINT, sigend);
+	signal_set(SIGTERM, sigend);
+
+	start_watcher();
 
 	printf("Starting at '%s'\n", init_dir);
-	num_files = trawl_dir(init_dir, inotify_fd);
+	num_files = trawl_dir(init_dir);
 	printf("Scanned %d files\n", num_files);
 
 	list_events();
 
-	printf("Starting inotify\n");
-	watch_dir(&inotify_fd);
+	pthread_cond_wait(&exit_cond, &exit_mutex);
+	stop_watcher();
 
 	return 0;
 }
