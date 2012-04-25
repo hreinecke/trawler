@@ -37,16 +37,20 @@ static int stopped;
 int insert_event(char *dirname, time_t dtime)
 {
 	struct tm dtm;
-	struct event_file *ev_file;
+	struct event_file *tmp_ef, *d_ef = NULL, *new_ef;
 	struct event_entry *tmp_ev, *d_ev = NULL, *last_ev = NULL;
+	char *ptr;
 
-	ev_file = malloc(sizeof(struct event_file));
-	if (!ev_file) {
+	new_ef = malloc(sizeof(struct event_file));
+	if (!new_ef) {
 		fprintf(stderr, "%s: Cannot allocate memory, error %d\n",
 			dirname, errno);
 		return -errno;
 	}
-	strcpy(ev_file->ef_path, dirname);
+	strcpy(new_ef->ef_path, dirname);
+	ptr = strrchr(new_ef->ef_path, '/');
+	if (ptr)
+		*ptr = '\0';
 
 	if (!gmtime_r(&dtime, &dtm)) {
 		fprintf(stderr, "%s: Cannot convert time, error %d\n",
@@ -64,6 +68,11 @@ int insert_event(char *dirname, time_t dtime)
 	}
 	if (!d_ev) {
 		d_ev = malloc(sizeof(struct event_entry));
+		if (!d_ev) {
+			fprintf(stderr,"%s: failed to allocate event entry\n",
+				dirname);
+			return -ENOMEM;
+		}
 		INIT_LIST_HEAD(&d_ev->ee_next);
 		INIT_LIST_HEAD(&d_ev->ee_entries);
 		d_ev->ee_time = dtime;
@@ -71,12 +80,23 @@ int insert_event(char *dirname, time_t dtime)
 			list_add(&d_ev->ee_next, &last_ev->ee_next);
 		else
 			list_add(&d_ev->ee_next, &event_list);
+	} else {
+		list_for_each_entry(tmp_ef, &d_ev->ee_entries, ef_next) {
+			if (!strcmp(tmp_ef->ef_path, new_ef->ef_path)) {
+				d_ef = tmp_ef;
+				break;
+			}
+		}
+		if (d_ef) {
+			free(new_ef);
+			return 0;
+		}
 	}
-	list_add(&ev_file->ef_next, &d_ev->ee_entries);
+	list_add(&new_ef->ef_next, &d_ev->ee_entries);
 	return 0;
 }
 
-int compare_watch(const void *a, const void *b)
+int compare_wd(const void *a, const void *b)
 {
 	const struct event_watch *ew1 = a, *ew2 = b;
 
@@ -85,6 +105,13 @@ int compare_watch(const void *a, const void *b)
 	if (ew1->ew_wd > ew2->ew_wd)
 		return 1;
 	return 0;
+}
+
+int compare_path(const void *a, const void *b)
+{
+	const struct event_watch *ew1 = a, *ew2 = b;
+
+	return strcmp(ew1->ew_path, ew2->ew_path);
 }
 
 int insert_inotify(char *dirname, int inotify_fd)
@@ -105,7 +132,7 @@ int insert_inotify(char *dirname, int inotify_fd)
 		return -errno;
 	}
 	strcpy(ew->ew_path, dirname);
-	val = tsearch((void *)ew, &watch_tree, compare_watch);
+	val = tsearch((void *)ew, &watch_tree, compare_wd);
 	if (!val) {
 		fprintf(stderr, "%s: Failed to insert watch entry\n", dirname);
 		inotify_rm_watch(inotify_fd, ew->ew_wd);
@@ -117,7 +144,33 @@ int insert_inotify(char *dirname, int inotify_fd)
 		free(ew);
 		return -EEXIST;
 	}
-	printf("%s: added inotify watch %d\n", dirname, ew->ew_wd);
+	printf("%s: added inotify watch %d\n", ew->ew_path, ew->ew_wd);
+	return 0;
+}
+
+int remove_inotify(char *dirname, int inotify_fd)
+{
+	void *val;
+	struct event_watch ew, *found_ew;
+
+	strcpy(ew.ew_path, dirname);
+	val = tfind((void *)&ew, &watch_tree, compare_path);
+	if (!val) {
+		fprintf(stderr, "%s: watch entry not found in tree", dirname);
+		return -EINVAL;
+	}
+	found_ew = *(struct event_watch **)val;
+	val = tdelete((void *)found_ew, &watch_tree, compare_wd);
+	if (!val) {
+		fprintf(stderr, "%s: failed to remove in watch entry",
+			dirname);
+		return -EINVAL;
+	}
+	inotify_rm_watch(inotify_fd, found_ew->ew_wd);
+	printf("%s: removed inotify watch %d\n",
+	       found_ew->ew_path, found_ew->ew_wd);
+	free(found_ew);
+
 	return 0;
 }
 
@@ -212,6 +265,8 @@ void * watch_dir(void * arg)
 			const char *type;
 			void *val;
 			struct event_watch ew, *found_ew;
+			const char *op;
+			char path[PATH_MAX];
 
 			in_ev = (struct inotify_event *)&(buf[i]);
 
@@ -220,7 +275,7 @@ void * watch_dir(void * arg)
 
 			ew.ew_wd = in_ev->wd;
 			val = tfind((void *)&ew, &watch_tree,
-					 compare_watch);
+					 compare_wd);
 			if (!val) {
 				fprintf(stderr, "inotify event %d not found "
 					"in tree", in_ev->wd);
@@ -235,30 +290,38 @@ void * watch_dir(void * arg)
 			if (in_ev->mask & IN_IGNORED) {
 				printf("inotify event %d removed\n",
 				       in_ev->wd);
-			} else if (in_ev->mask & IN_Q_OVERFLOW) {
+				goto next;
+			}
+			if (in_ev->mask & IN_Q_OVERFLOW) {
 				printf("inotify event %d: queue overflow\n",
 				       in_ev->wd);
-			} else {
-				const char *op;
-
-				printf("event %d: %x\n",
-				       in_ev->wd, in_ev->mask);
-				if (in_ev->mask & IN_CREATE)
-					op = "created";
-				else if (in_ev->mask & IN_DELETE)
-					op = "deleted";
-				else if (in_ev->mask & IN_MODIFY)
-					op = "modified";
-				else if (in_ev->mask & IN_OPEN)
-					op = "opened";
-				else if (in_ev->mask & IN_CLOSE)
-					op = "closed";
-				else if (in_ev->mask & IN_MOVE)
-					op = "moved";
-				else
-					op = "<unhandled>";
-				printf("\t%s %s %s/%s\n", op, type,
-				       found_ew->ew_path, in_ev->name);
+				goto next;
+			}
+			printf("event %d: %x\n",
+			       in_ev->wd, in_ev->mask);
+			if (in_ev->mask & IN_CREATE)
+				op = "created";
+			else if (in_ev->mask & IN_DELETE)
+				op = "deleted";
+			else if (in_ev->mask & IN_MODIFY)
+				op = "modified";
+			else if (in_ev->mask & IN_OPEN)
+				op = "opened";
+			else if (in_ev->mask & IN_CLOSE)
+				op = "closed";
+			else if (in_ev->mask & IN_MOVE)
+				op = "moved";
+			else
+				op = "<unhandled>";
+			sprintf(path, "%s/%s", found_ew->ew_path, in_ev->name);
+			printf("\t%s %s %s\n", op, type, path);
+			if (in_ev->mask & IN_ISDIR) {
+				if ((in_ev->mask & IN_DELETE) ||
+				    (in_ev->mask & IN_MOVED_FROM))
+					remove_inotify(path, inotify_fd);
+				if ((in_ev->mask & IN_CREATE) ||
+				    (in_ev->mask & IN_MOVED_TO))
+					insert_inotify(path, inotify_fd);
 			}
 		next:
 			i += EVENT_SIZE + in_ev->len;
