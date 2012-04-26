@@ -20,7 +20,7 @@
 #include <pthread.h>
 #include "list.h"
 #include "watcher.h"
-#include "event.h"
+#include "events.h"
 
 pthread_cond_t exit_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t exit_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -72,9 +72,11 @@ int trawl_dir(char *dirname)
 	}
 
 	if (!S_ISDIR(dirst.st_mode)) {
+#if 0
 		if (insert_event(dirname, dtime) < 0)
 			return 0;
 		else
+#endif
 			return 1;
 	}
 	if (insert_inotify(dirname, 0) < 0)
@@ -103,13 +105,86 @@ int trawl_dir(char *dirname)
 	return num_files;
 }
 
+unsigned long parse_time(char *optarg)
+{
+	struct tm c;
+	char *p, *e;
+	unsigned long val;
+	double ret = 0;
+	time_t now, test;
+
+	now = test = time(NULL);
+	if (localtime_r(&now, &c) == 0) {
+		fprintf(stderr, "Cannot initialize time, error %d\n", errno);
+		return 0;
+	}
+	p = optarg;
+	while (p) {
+		val = strtoul(p, &e, 10);
+		if (p == e)
+			break;
+		printf("%s %s %lu\n", p, e, val);
+		if (!p) {
+			ret = val;
+			break;
+		}
+		switch (*e) {
+		case 'Y':
+			printf("mon: %d %lu\n", c.tm_mon, val);
+			c.tm_year += val;
+			break;
+		case 'M':
+			printf("mon: %d %lu\n", c.tm_mon, val);
+			c.tm_mon += val;
+			break;
+		case 'D':
+			printf("day: %d %lu\n", c.tm_mday, val);
+			c.tm_mday += val + 1;
+			break;
+		case 'h':
+			printf("hour: %d %lu\n", c.tm_hour, val);
+			c.tm_hour += val;
+			break;
+		case 'm':
+			printf("min: %d %lu\n", c.tm_min, val);
+			c.tm_min += val;
+			break;
+		case 's':
+			printf("sec: %d %lu\n", c.tm_sec, val);
+			c.tm_sec += val;
+			break;
+		default:
+			fprintf(stderr, "Invalid time specifier '%c'\n", *e);
+			break;
+		}
+		p = e + 1;
+	}
+	test = mktime(&c);
+	if (test == (time_t)-1) {
+		fprintf(stderr, "Failed to convert time\n");
+		ret = -1;
+	}
+	ret = difftime(test, now);
+	printf("Checking every %lu secs\n", (long)ret);
+
+	return (long)ret;
+}
+
 int main(int argc, char **argv)
 {
 	int i, num_files;
 	char init_dir[PATH_MAX];
+	unsigned long checkinterval;
 
-	while ((i = getopt(argc, argv, "d:")) != -1) {
+	while ((i = getopt(argc, argv, "c:d:")) != -1) {
 		switch (i) {
+		case 'c':
+			checkinterval = parse_time(optarg);
+			if (checkinterval < 0) {
+				fprintf(stderr, "Invalid time '%s'\n", optarg);
+				return 1;
+			}
+			break;
 		case 'd':
 			realpath(optarg, init_dir);
 			break;
