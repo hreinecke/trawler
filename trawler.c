@@ -175,6 +175,8 @@ int main(int argc, char **argv)
 	int i, num_files;
 	char init_dir[PATH_MAX];
 	unsigned long checkinterval;
+	time_t starttime, endtime;
+	double elapsed;
 
 	while ((i = getopt(argc, argv, "c:d:")) != -1) {
 		switch (i) {
@@ -220,9 +222,12 @@ int main(int argc, char **argv)
 
 	start_watcher();
 
+	starttime = time(NULL);
 	printf("Starting at '%s'\n", init_dir);
 	num_files = trawl_dir(init_dir);
-	printf("Scanned %d files\n", num_files);
+	endtime = time(NULL);
+	elapsed = difftime(endtime, starttime);
+	printf("Checked %d files in %f seconds\n", num_files, elapsed);
 
 	list_events();
 
