@@ -67,10 +67,11 @@ void * watch_fanotify(void * arg)
 	fd_set rfd;
 	struct timeval tmo;
 	char fname[PATH_MAX];
+	int i = 0;
 
 	while (!stopped) {
 		struct fanotify_event_metadata event;
-		int rlen, ret, i = 0;
+		int rlen, ret;
 
 		FD_ZERO(&rfd);
 		FD_SET(fanotify_fd, &rfd);
@@ -117,6 +118,7 @@ void * watch_fanotify(void * arg)
 			}
 		}
 		close(event.fd);
+		i++;
 	}
 	return NULL;
 }
