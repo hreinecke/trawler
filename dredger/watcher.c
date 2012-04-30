@@ -69,8 +69,7 @@ struct migrate_event *malloc_migrate_event(int fd)
 
 	event = malloc(sizeof(struct migrate_event));
 	if (!event) {
-		fprintf(stderr, "cannot allocate event, error %d\n",
-			errno);
+		err("watcher: cannot allocate event, error %d\n", errno);
 		return NULL;
 	}
 	memset(event, 0, sizeof(struct migrate_event));
@@ -96,10 +95,10 @@ void free_migrate_event(void *arg)
 		else
 			resp.response = FAN_ALLOW;
 		if (write(event->fanotify_fd, &resp, sizeof(resp)) < 0) {
-			fprintf(stderr, "Failed to write fanotify "
-				"response: error %d\n", errno);
+			err("watcher: Failed to write fanotify "
+			    "response: error %d\n", errno);
 		} else {
-			printf("Wrote response '%s'\n",
+			dbg("watcher: Wrote response '%s'\n",
 			       (resp.response == FAN_ALLOW) ?
 			       "FAN_ALLOW" : "FAN_DENY");
 		}
@@ -113,19 +112,23 @@ void free_migrate_event(void *arg)
 
 int migrate_file(int fanotify_fd, char *filename)
 {
-	struct migrate_event *event;
+	struct migrate_event *event, *tmp;
 	int migrate_fd;
 	enum migrate_state state;
 	int ret;
 
 	event = malloc_migrate_event(fanotify_fd);
+	if (!event) {
+		err("Cannot allocate event, error %d", errno);
+		return errno;
+	}
 	/* We have checked for this event prior to entry
 	 * So it would be rather rare event if we've
 	 * found it now.
 	 */
 	pthread_mutex_lock(&event_lock);
-	list_for_each_entry(event, &event_list, next) {
-		if (!strcmp(event->pathname, filename)) {
+	list_for_each_entry(tmp, &event_list, next) {
+		if (!strcmp(tmp->pathname, filename)) {
 			/* Hmph. Abort migration */
 			free(event);
 			pthread_mutex_unlock(&event_lock);
@@ -138,9 +141,9 @@ int migrate_file(int fanotify_fd, char *filename)
 	pthread_mutex_unlock(&event_lock);
 
 	migrate_fd = open_backend_file(event->pathname);
-	if (!migrate_fd) {
-		fprintf(stderr,"failed to open backend file %s, error %d\n",
-			event->pathname, errno);
+	if (migrate_fd < 0) {
+		err("failed to open backend file %s, error %d",
+		    event->pathname, errno);
 		ret = errno;
 		goto out;
 	}
@@ -148,8 +151,8 @@ int migrate_file(int fanotify_fd, char *filename)
 	state = event->state;
 	pthread_mutex_unlock(&event_lock);
 	if (state == MIGRATE_ABORTED) {
-		fprintf(stderr, "migration on file %s aborted\n",
-			event->pathname);
+		info("migration on file %s aborted",
+		     event->pathname);
 		close_backend_file(migrate_fd);
 		ret = EINTR;
 		goto out;
@@ -157,11 +160,10 @@ int migrate_file(int fanotify_fd, char *filename)
 	ret = migrate_backend_file(event->fa.fd, migrate_fd);
 	pthread_mutex_lock(&event_lock);
 	if (event->state == MIGRATE_ABORTED) {
-		fprintf(stderr, "migration on file %s aborted\n",
-			event->pathname);
-	} else if (ret < 0) {
-		fprintf(stderr, "failed to migrate file %s, error %d\n",
-			event->pathname, ret);
+		info("migration on file %s aborted", event->pathname);
+	} else if (ret) {
+		err("failed to migrate file %s, error %d",
+		    event->pathname, ret);
 		event->state = MIGRATE_FAILED;
 	} else {
 		event->state = MIGRATE_DONE;
@@ -173,8 +175,8 @@ int migrate_file(int fanotify_fd, char *filename)
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
 				    AT_FDCWD, event->pathname);
 		if (ret < 0) {
-			fprintf(stderr, "failed to add fanotify mark "
-				"to %s, error %d\n", event->pathname, errno);
+			err("failed to add fanotify mark "
+			    "to %s, error %d\n", event->pathname, errno);
 		}
 		ret = -ret;
 	}
@@ -195,14 +197,14 @@ void * unmigrate_file(void *arg)
 	event->state = UNMIGRATE_OPEN;
 	migrate_fd = open_backend_file(event->pathname);
 	if (!migrate_fd) {
-		fprintf(stderr,"failed to open backend file %s, error %d\n",
-			event->pathname, errno);
+		err("failed to open backend file %s, error %d",
+		    event->pathname, errno);
 		goto out;
 	}
 	event->state = UNMIGRATE_BUSY;
 	ret = unmigrate_backend_file(event->fa.fd, migrate_fd);
 	if (ret < 0) {
-		fprintf(stderr, "failed to unmigrate file %s, error %d\n",
+		err("failed to unmigrate file %s, error %d",
 			event->pathname, ret);
 		event->state = UNMIGRATE_FAILED;
 	} else {
@@ -214,8 +216,8 @@ void * unmigrate_file(void *arg)
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
 				    AT_FDCWD, event->pathname);
 		if (ret < 0) {
-			fprintf(stderr, "failed to remove fanotify mark "
-				"from %s, error %d\n", event->pathname, errno);
+			err("failed to remove fanotify mark "
+			    "from %s, error %d", event->pathname, errno);
 		}
 	}
 out:
@@ -245,23 +247,22 @@ void * watch_fanotify(void * arg)
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr,"select returned %d\n", errno);
+			err("select returned %d", errno);
 			break;
 		}
 		if (ret == 0) {
-			fprintf(stderr, "select timeout\n");
+			dbg("watcher: select timeout");
 			continue;
 		}
 		if (!FD_ISSET(fanotify_fd, &rfd)) {
-			fprintf(stderr, "select returned for invalid fd\n");
+			err("select returned for invalid fd");
 			continue;
 		}
 
 		rlen = read(fanotify_fd, &event->fa,
 			    sizeof(struct fanotify_event_metadata));
 		if (rlen < 0) {
-			fprintf(stderr, "error %d on reading fanotify\n",
-				errno);
+			err("error %d on reading fanotify event", errno);
 			continue;
 		}
 		if (!(event->fa.mask & FAN_ACCESS_PERM)) {
@@ -269,11 +270,11 @@ void * watch_fanotify(void * arg)
 		}
 
 		if (get_fname(event->fa.fd, event->pathname) < 0) {
-			fprintf(stderr, "cannot retrieve filename\n");
+			err("cannot retrieve filename");
 			continue;
 		}
 
-		printf("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d\n",
+		dbg("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d",
 		       i, (unsigned long) event->fa.mask, event->fa.fd,
 		       event->pathname, event->fa.pid);
 		pthread_mutex_lock(&event_lock);
@@ -299,8 +300,7 @@ void * watch_fanotify(void * arg)
 			continue;
 		ret = pthread_create(&event->thr, NULL, unmigrate_file, event);
 		if (ret < 0) {
-			fprintf(stderr, "Failed to start thread, error %d\n",
-				errno);
+			err("Failed to start thread, error %d", errno);
 			free_migrate_event(event);
 		}
 		event = malloc_migrate_event(fanotify_fd);
@@ -317,12 +317,11 @@ pthread_t start_watcher(void)
 	retval = pthread_create(&watcher_thr, NULL,
 				watch_fanotify, &fanotify_fd);
 	if (retval) {
-		fprintf(stderr, "Failed to start fanotify watcher, error %d\n",
-			retval);
+		err("Failed to start fanotify watcher, error %d", retval);
 		errno = retval;
 		return (pthread_t)0;
 	}
-	printf("Started fanotify watcher\n");
+	info("Started fanotify watcher");
 
 	return watcher_thr;
 }
@@ -331,7 +330,7 @@ int stop_watcher(pthread_t watcher_thr)
 {
 	pthread_cancel(watcher_thr);
 	pthread_join(watcher_thr, NULL);
-	printf("Stopped fanotify watcher\n");
+	info("Stopped fanotify watcher");
 	return 0;
 }
 

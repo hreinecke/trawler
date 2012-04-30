@@ -124,6 +124,9 @@ void *cli_monitor_thread(void *ctx)
 			buf[0] = ENODEV;
 			iov.iov_len = 1;
 			goto send_msg;
+		} else {
+			*filestr = '\0';
+			filestr++;
 		}
 		info("CLI event '%s' file '%s'", event, filestr);
 
@@ -184,7 +187,7 @@ pthread_t start_cli(int fanotify_fd)
 
 	memset(&sun, 0x00, sizeof(struct sockaddr_un));
 	sun.sun_family = AF_LOCAL;
-	strcpy(&sun.sun_path[1], "/org/kernel/md/md_monitor");
+	strcpy(&sun.sun_path[1], "/org/kernel/trawler/dredger");
 	addrlen = offsetof(struct sockaddr_un, sun_path) +
 		strlen(sun.sun_path + 1) + 1;
 	cli->sock = socket(AF_LOCAL, SOCK_DGRAM, 0);
@@ -214,13 +217,10 @@ pthread_t start_cli(int fanotify_fd)
 	return cli->thread;
 }
 
-void stop_cli(struct cli_monitor *cli)
+void stop_cli(pthread_t cli_thr)
 {
-	if (cli && cli->thread) {
-		pthread_cancel(cli->thread);
-		pthread_join(cli->thread, NULL);
-	}
-	free(cli);
+	pthread_cancel(cli_thr);
+	pthread_join(cli_thr, NULL);
 }
 
 int cli_command(char *cmd)
@@ -244,7 +244,7 @@ int cli_command(char *cmd)
 	}
 	memset(&local, 0x00, sizeof(struct sockaddr_un));
 	local.sun_family = AF_LOCAL;
-	sprintf(&local.sun_path[1], "/org/kernel/md/md_monitor/%d", getpid());
+	sprintf(&local.sun_path[1], "/org/kernel/trawler/dredger/%d", getpid());
 	addrlen = offsetof(struct sockaddr_un, sun_path) +
 		strlen(local.sun_path + 1) + 1;
 	if (bind(cli_sock, (struct sockaddr *) &local, addrlen) < 0) {
@@ -255,7 +255,7 @@ int cli_command(char *cmd)
 		   &feature_on, sizeof(feature_on));
 	memset(&sun, 0x00, sizeof(struct sockaddr_un));
 	sun.sun_family = AF_LOCAL;
-	strcpy(&sun.sun_path[1], "/org/kernel/md/md_monitor");
+	strcpy(&sun.sun_path[1], "/org/kernel/trawler/dredger");
 	addrlen = offsetof(struct sockaddr_un, sun_path) +
 		strlen(sun.sun_path + 1) + 1;
 	memset(&iov, 0, sizeof(iov));
