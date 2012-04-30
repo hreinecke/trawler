@@ -23,12 +23,12 @@
 # error "System call numbers not defined for this architecture"
 #endif
 
-static int fanotify_init(unsigned int flags, unsigned int event_f_flags)
+int fanotify_init(unsigned int flags, unsigned int event_f_flags)
 {
 	return syscall(__NR_fanotify_init, flags, event_f_flags);
 }
 
-static int fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
+int fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
 		  int dfd, const char *pathname)
 {
 	return syscall(__NR_fanotify_mark, fanotify_fd, flags, mask,

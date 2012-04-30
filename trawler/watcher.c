@@ -15,7 +15,6 @@
 #include <stddef.h>
 #include <string.h>
 #include <errno.h>
-#define __USE_GNU
 #include <search.h>
 #include <pthread.h>
 
