@@ -19,6 +19,8 @@
 #include <pthread.h>
 
 #include "logging.h"
+#include "dredger.h"
+#include "watcher.h"
 
 struct cli_monitor {
 	int running;
@@ -126,13 +128,13 @@ void *cli_monitor_thread(void *ctx)
 		info("CLI event '%s' file '%s'", event, filestr);
 
 		if (!strcmp(event, "Migrate")) {
-			if (check_backend(filestr) > 0) {
+			if (check_watcher(filestr) == EBUSY) {
 				info("File '%s' under un-migration", filestr);
 				buf[0] = EBUSY;
 				iov.iov_len = 1;
 				goto send_msg;
 			}
-			ret = migrate_file(filestr);
+			ret = migrate_file(cli->fanotify_fd, filestr);
 			if (ret) {
 				buf[0] = ret;
 				iov.iov_len = 1;
@@ -143,7 +145,7 @@ void *cli_monitor_thread(void *ctx)
 			goto send_msg;
 		}
 		if (!strcmp(event, "Check")) {
-			if (check_backend(filestr) < 0) {
+			if (check_backend_file(filestr) < 0) {
 				info("File '%s' not watched", filestr);
 				buf[0] = ENODEV;
 				iov.iov_len = 1;
@@ -189,13 +191,13 @@ pthread_t start_cli(int fanotify_fd)
 	if (cli->sock < 0) {
 		err("cannot open cli socket, error %d", errno);
 		free(cli);
-		return NULL;
+		return (pthread_t)0;
 	}
 	if (bind(cli->sock, (struct sockaddr *) &sun, addrlen) < 0) {
 		err("cannot bind cli socket, error %d", errno);
 		close(cli->sock);
 		free(cli);
-		return NULL;
+		return (pthread_t)0;
 	}
 	setsockopt(cli->sock, SOL_SOCKET, SO_PASSCRED,
 		   &feature_on, sizeof(feature_on));
@@ -206,7 +208,7 @@ pthread_t start_cli(int fanotify_fd)
 		close(cli->sock);
 		err("Failed to start cli monitor: %d", errno);
 		free(cli);
-		cli = NULL;
+		return (pthread_t)0;
 	}
 
 	return cli->thread;

@@ -96,11 +96,52 @@ int open_backend_file(char *fname)
 
 	strcpy(buf, file_backend_prefix);
 	strcat(buf, fname);
-	fd = open(buf, O_RDWR);
+	fd = open(buf, O_RDWR|O_CREAT, S_IRWXU);
 	if (fd < 0) {
 		fprintf(stderr,"Cannot open %s, error %d\n", buf, errno);
 	}
 	return fd;
+}
+
+int check_backend_file(char *fname)
+{
+	char buf[FILENAME_MAX];
+	struct stat st;
+
+	strcpy(buf, file_backend_prefix);
+	strcat(buf, fname);
+	if (stat(buf, &st) < 0)
+		return errno;
+
+	return 0;
+}
+
+int migrate_backend_file(int dst_fd, int src_fd)
+{
+	struct stat src_st, dst_st;
+
+	if (fstat(dst_fd, &dst_st) < 0) {
+		fprintf(stderr, "Cannot stat destination fd, error %d\n",
+			errno);
+		return errno;
+	}
+	if (fstat(src_fd, &src_st) < 0) {
+		fprintf(stderr, "Cannot stat source fd, error %d\n", errno);
+		return errno;
+	}
+	if (src_st.st_size < dst_st.st_size) {
+		printf("Updating file size from %ld bytes to %ld bytes\n",
+		       dst_st.st_size, src_st.st_size);
+		if (posix_fallocate(dst_fd, 0, src_st.st_size) < 0) {
+			fprintf(stderr, "fallocate failed, error %d\n", errno);
+			return errno;
+		}
+	}
+	if (sendfile(src_fd, dst_fd, 0, src_st.st_size) < 0) {
+		fprintf(stderr, "sendfile failed, error %d\n", errno);
+		return errno;
+	}
+	return 0;
 }
 
 int unmigrate_backend_file(int dst_fd, int src_fd)
@@ -138,9 +179,8 @@ void close_backend_file(int fd)
 
 int main(int argc, char **argv)
 {
-	int i, retval;
+	int i;
 	char init_dir[PATH_MAX];
-	struct cli_monitor *cli;
 	int fanotify_fd;
 
 	while ((i = getopt(argc, argv, "b:c:d:p:")) != -1) {
@@ -210,7 +250,7 @@ int main(int argc, char **argv)
 		return errno;
 
 	cli_thr = start_cli(fanotify_fd);
-	if (!cli_trh) {
+	if (!cli_thr) {
 		stop_watcher(watcher_thr);
 		return ENOMEM;
 	}

@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
@@ -27,20 +28,24 @@ pthread_mutex_t event_lock= PTHREAD_MUTEX_INITIALIZER;
 LIST_HEAD(event_list);
 
 enum migrate_state {
-	MIGRATE_NONE = -1,
-	MIGRATE_WATCHED,
+	MIGRATE_NONE,
 	MIGRATE_STARTED,
-	MIGRATE_OPEN,
-	MIGRATE_BUSY,
 	MIGRATE_FAILED,
 	MIGRATE_DONE,
-	MIGRATE_CLOSE
+	MIGRATE_ABORTED,
+	UNMIGRATE_STARTED,
+	UNMIGRATE_OPEN,
+	UNMIGRATE_BUSY,
+	UNMIGRATE_FAILED,
+	UNMIGRATE_DONE,
+	UNMIGRATE_CLOSE
 };
 
-struct unmigrate_event {
+struct migrate_event {
 	struct list_head next;
 	pthread_t thr;
 	int fanotify_fd;
+	char pathname[FILENAME_MAX];
 	enum migrate_state state;
 	struct fanotify_event_metadata fa;
 };
@@ -58,25 +63,25 @@ int get_fname(int fd, char *fname)
 	return len;
 }
 
-struct unmigrate_event *malloc_unmigrate_event(int fd)
+struct migrate_event *malloc_migrate_event(int fd)
 {
-	struct unmigrate_event *event;
+	struct migrate_event *event;
 
-	event = malloc(sizeof(struct unmigrate_event));
+	event = malloc(sizeof(struct migrate_event));
 	if (!event) {
 		fprintf(stderr, "cannot allocate event, error %d\n",
 			errno);
 		return NULL;
 	}
-	memset(event, 0, sizeof(struct unmigrate_event));
+	memset(event, 0, sizeof(struct migrate_event));
 	INIT_LIST_HEAD(&event->next);
 	event->fanotify_fd = fd;
 	return event;
 }
 
-void free_unmigrate_event(void *arg)
+void free_migrate_event(void *arg)
 {
-	struct unmigrate_event *event = arg;
+	struct migrate_event *event = arg;
 
 	pthread_mutex_lock(&event_lock);
 	list_del_init(&event->next);
@@ -85,8 +90,8 @@ void free_unmigrate_event(void *arg)
 		struct fanotify_response resp;
 
 		resp.fd = event->fa.fd;
-		if (event->state == MIGRATE_BUSY ||
-		    event->state == MIGRATE_FAILED)
+		if (event->state == UNMIGRATE_BUSY ||
+		    event->state == UNMIGRATE_FAILED)
 			resp.response = FAN_DENY;
 		else
 			resp.response = FAN_ALLOW;
@@ -106,47 +111,111 @@ void free_unmigrate_event(void *arg)
 	free(event);
 }
 
-void * unmigrate_file(void *arg)
+int migrate_file(int fanotify_fd, char *filename)
 {
-	struct unmigrate_event *event = arg;
-	int migrate_fd, ret;
-	char fname[PATH_MAX];
+	struct migrate_event *event;
+	int migrate_fd;
+	enum migrate_state state;
+	int ret;
 
-	pthread_cleanup_push(free_unmigrate_event, (void *)event);
-	if (!(event->fa.mask & FAN_ACCESS_PERM)) {
-		goto out;
+	event = malloc_migrate_event(fanotify_fd);
+	/* We have checked for this event prior to entry
+	 * So it would be rather rare event if we've
+	 * found it now.
+	 */
+	pthread_mutex_lock(&event_lock);
+	list_for_each_entry(event, &event_list, next) {
+		if (!strcmp(event->pathname, filename)) {
+			/* Hmph. Abort migration */
+			free(event);
+			pthread_mutex_unlock(&event_lock);
+			return EBUSY;
+		}
 	}
-
+	strcpy(event->pathname, filename);
 	event->state = MIGRATE_STARTED;
-	if (get_fname(event->fa.fd, fname) < 0) {
-		fprintf(stderr, "cannot retrieve filename\n");
-		goto out;
-	}
+	list_add(&event->next, &event_list);
+	pthread_mutex_unlock(&event_lock);
 
-	event->state = MIGRATE_OPEN;
-	migrate_fd = open_backend_file(fname);
+	migrate_fd = open_backend_file(event->pathname);
 	if (!migrate_fd) {
 		fprintf(stderr,"failed to open backend file %s, error %d\n",
-			fname, errno);
+			event->pathname, errno);
+		ret = errno;
 		goto out;
 	}
-	event->state = MIGRATE_BUSY;
-	ret = unmigrate_backend_file(event->fa.fd, migrate_fd);
-	if (ret < 0) {
-		fprintf(stderr, "failed to unmigrate file %s, error %d\n",
-			fname, ret);
+	pthread_mutex_lock(&event_lock);
+	state = event->state;
+	pthread_mutex_unlock(&event_lock);
+	if (state == MIGRATE_ABORTED) {
+		fprintf(stderr, "migration on file %s aborted\n",
+			event->pathname);
+		close_backend_file(migrate_fd);
+		ret = EINTR;
+		goto out;
+	}
+	ret = migrate_backend_file(event->fa.fd, migrate_fd);
+	pthread_mutex_lock(&event_lock);
+	if (event->state == MIGRATE_ABORTED) {
+		fprintf(stderr, "migration on file %s aborted\n",
+			event->pathname);
+	} else if (ret < 0) {
+		fprintf(stderr, "failed to migrate file %s, error %d\n",
+			event->pathname, ret);
 		event->state = MIGRATE_FAILED;
 	} else {
 		event->state = MIGRATE_DONE;
 	}
+	pthread_mutex_unlock(&event_lock);
 	close_backend_file(migrate_fd);
 	if (event->state == MIGRATE_DONE) {
+		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_ADD,
+				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
+				    AT_FDCWD, event->pathname);
+		if (ret < 0) {
+			fprintf(stderr, "failed to add fanotify mark "
+				"to %s, error %d\n", event->pathname, errno);
+		}
+		ret = -ret;
+	}
+out:
+	pthread_mutex_lock(&event_lock);
+	list_del_init(&event->next);
+	pthread_mutex_unlock(&event_lock);
+	free(event);
+	return ret;
+}
+
+void * unmigrate_file(void *arg)
+{
+	struct migrate_event *event = arg;
+	int migrate_fd, ret;
+
+	pthread_cleanup_push(free_migrate_event, (void *)event);
+	event->state = UNMIGRATE_OPEN;
+	migrate_fd = open_backend_file(event->pathname);
+	if (!migrate_fd) {
+		fprintf(stderr,"failed to open backend file %s, error %d\n",
+			event->pathname, errno);
+		goto out;
+	}
+	event->state = UNMIGRATE_BUSY;
+	ret = unmigrate_backend_file(event->fa.fd, migrate_fd);
+	if (ret < 0) {
+		fprintf(stderr, "failed to unmigrate file %s, error %d\n",
+			event->pathname, ret);
+		event->state = UNMIGRATE_FAILED;
+	} else {
+		event->state = UNMIGRATE_DONE;
+	}
+	close_backend_file(migrate_fd);
+	if (event->state == UNMIGRATE_DONE) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_REMOVE,
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
-				    AT_FDCWD, fname);
+				    AT_FDCWD, event->pathname);
 		if (ret < 0) {
 			fprintf(stderr, "failed to remove fanotify mark "
-				"from %s, error %d\n", fname, errno);
+				"from %s, error %d\n", event->pathname, errno);
 		}
 	}
 out:
@@ -160,11 +229,12 @@ void * watch_fanotify(void * arg)
 	fd_set rfd;
 	struct timeval tmo;
 	int i = 0;
-	struct unmigrate_event *event;
+	struct migrate_event *event;
 
-	event = malloc_unmigrate_event(fanotify_fd);
+	event = malloc_migrate_event(fanotify_fd);
 
 	while (!daemon_stopped) {
+		struct migrate_event *tmp;
 		int rlen, ret;
 
 		FD_ZERO(&rfd);
@@ -194,19 +264,46 @@ void * watch_fanotify(void * arg)
 				errno);
 			continue;
 		}
-		printf("fanotify event %d: mask 0x%02lX, fd %d, pid %d\n",
+		if (!(event->fa.mask & FAN_ACCESS_PERM)) {
+			continue;
+		}
+
+		if (get_fname(event->fa.fd, event->pathname) < 0) {
+			fprintf(stderr, "cannot retrieve filename\n");
+			continue;
+		}
+
+		printf("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d\n",
 		       i, (unsigned long) event->fa.mask, event->fa.fd,
-		       event->fa.pid);
+		       event->pathname, event->fa.pid);
 		pthread_mutex_lock(&event_lock);
-		list_add(&event->next, &event_list);
+		list_for_each_entry(tmp, &event_list, next) {
+			if (!strcmp(tmp->pathname, event->pathname)) {
+				if (tmp->state == MIGRATE_STARTED) {
+					/* Migration in progress. Abort */
+					tmp->state = MIGRATE_ABORTED;
+					continue;
+				}
+				if (tmp->state == MIGRATE_DONE ||
+				    tmp->state == MIGRATE_FAILED)
+					/* Migration done, continue */
+					continue;
+				event->state = UNMIGRATE_BUSY;
+				break;
+			}
+		}
+		if (event->state != UNMIGRATE_BUSY)
+			list_add(&event->next, &event_list);
 		pthread_mutex_unlock(&event_lock);
+		if (list_empty(&event->next))
+			continue;
 		ret = pthread_create(&event->thr, NULL, unmigrate_file, event);
 		if (ret < 0) {
 			fprintf(stderr, "Failed to start thread, error %d\n",
 				errno);
-			free_unmigrate_event(event);
+			free_migrate_event(event);
 		}
-		event = malloc_unmigrate_event(fanotify_fd);
+		event = malloc_migrate_event(fanotify_fd);
 		i++;
 	}
 	return NULL;
@@ -223,7 +320,7 @@ pthread_t start_watcher(void)
 		fprintf(stderr, "Failed to start fanotify watcher, error %d\n",
 			retval);
 		errno = retval;
-		return NULL;
+		return (pthread_t)0;
 	}
 	printf("Started fanotify watcher\n");
 
@@ -238,3 +335,30 @@ int stop_watcher(pthread_t watcher_thr)
 	return 0;
 }
 
+int check_watcher(char *pathname)
+{
+	struct migrate_event *event;
+	enum migrate_state state = MIGRATE_NONE;
+	int ret;
+
+	pthread_mutex_lock(&event_lock);
+	list_for_each_entry(event, &event_list, next) {
+		if (!strcmp(event->pathname, pathname)) {
+			state = event->state;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&event_lock);
+	switch (state) {
+	case MIGRATE_NONE:
+		ret = 0;
+		break;
+	case UNMIGRATE_FAILED:
+		ret = EAGAIN;
+		break;
+	default:
+		ret = EBUSY;
+		break;
+	}
+	return ret;
+}
