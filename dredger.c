@@ -89,13 +89,26 @@ int open_backend_file(char *fname)
 
 int unmigrate_backend_file(int dst_fd, int src_fd)
 {
-	struct stat stbuf;
+	struct stat src_st, dst_st;
 
-	if (fstat(src_fd, &stbuf) < 0) {
+	if (fstat(dst_fd, &dst_st) < 0) {
+		fprintf(stderr, "Cannot stat destination fd, error %d\n",
+			errno);
+		return errno;
+	}
+	if (fstat(src_fd, &src_st) < 0) {
 		fprintf(stderr, "Cannot stat source fd, error %d\n", errno);
 		return errno;
 	}
-	if (sendfile(src_fd, dst_fd, 0, stbuf.st_size) < 0) {
+	if (dst_st.st_size < src_st.st_size) {
+		printf("Updating file size from %ld bytes to %ld bytes\n",
+		       dst_st.st_size, src_st.st_size);
+		if (posix_fallocate(dst_fd, 0, src_st.st_size) < 0) {
+			fprintf(stderr, "fallocate failed, error %d\n", errno);
+			return errno;
+		}
+	}
+	if (sendfile(src_fd, dst_fd, 0, src_st.st_size) < 0) {
 		fprintf(stderr, "sendfile failed, error %d\n", errno);
 		return errno;
 	}
