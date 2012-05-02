@@ -14,13 +14,13 @@
 #include <string.h>
 #include <pthread.h>
 #include <sys/stat.h>
-#include <sys/sendfile.h>
 #include <sys/syslog.h>
 #include <stdarg.h>
 #include "fanotify.h"
 #include "fanotify-syscall.h"
 #include "list.h"
 #include "logging.h"
+#include "backend.h"
 #include "watcher.h"
 #include "cli.h"
 
@@ -36,6 +36,11 @@ char file_backend_prefix[FILENAME_MAX];
 int log_priority = LOG_ERR;
 int use_syslog;
 FILE *logfd;
+
+struct backend *backend_list[] = {
+	&backend_file,
+	NULL
+};
 
 static void *
 signal_set(int signo, void (*func) (int))
@@ -89,105 +94,31 @@ void log_fn(int priority, const char *format, ...)
 	va_end(ap);
 }
 
-int open_backend_file(char *fname)
-{
-	int fd = -1;
-	char buf[FILENAME_MAX];
+struct backend *select_backend(const char *name) {
+	int i = 0;
 
-	strcpy(buf, file_backend_prefix);
-	strcat(buf, fname);
-	fd = open(buf, O_RDWR|O_CREAT, S_IRWXU);
-	if (fd < 0) {
-		err("Cannot open %s, error %d", buf, errno);
+	while (backend_list[i]) {
+		if (!strcmp(backend_list[i]->name, name))
+			return backend_list[i];
+		i++;
 	}
-	return fd;
-}
-
-int check_backend_file(char *fname)
-{
-	char buf[FILENAME_MAX];
-	struct stat st;
-
-	strcpy(buf, file_backend_prefix);
-	strcat(buf, fname);
-	if (stat(buf, &st) < 0)
-		return errno;
-
-	return 0;
-}
-
-int migrate_backend_file(int dst_fd, int src_fd)
-{
-	struct stat src_st, dst_st;
-
-	if (fstat(dst_fd, &dst_st) < 0) {
-		err("Cannot stat destination fd, error %d", errno);
-		return errno;
-	}
-	if (fstat(src_fd, &src_st) < 0) {
-		err("Cannot stat source fd, error %d", errno);
-		return errno;
-	}
-	if (src_st.st_size < dst_st.st_size) {
-		info("Updating file size from %ld bytes to %ld bytes",
-		       dst_st.st_size, src_st.st_size);
-		if (posix_fallocate(dst_fd, 0, src_st.st_size) < 0) {
-			err("fallocate failed, error %d", errno);
-			return errno;
-		}
-	}
-	if (sendfile(src_fd, dst_fd, 0, src_st.st_size) < 0) {
-		err("sendfile failed, error %d", errno);
-		return errno;
-	}
-	return 0;
-}
-
-int unmigrate_backend_file(int dst_fd, int src_fd)
-{
-	struct stat src_st, dst_st;
-
-	if (fstat(dst_fd, &dst_st) < 0) {
-		err("Cannot stat destination fd, error %d", errno);
-		return errno;
-	}
-	if (fstat(src_fd, &src_st) < 0) {
-		err("Cannot stat source fd, error %d", errno);
-		return errno;
-	}
-	if (dst_st.st_size < src_st.st_size) {
-		info("Updating file size from %ld bytes to %ld bytes",
-		     dst_st.st_size, src_st.st_size);
-		if (posix_fallocate(dst_fd, 0, src_st.st_size) < 0) {
-			err("fallocate failed, error %d", errno);
-			return errno;
-		}
-	}
-	if (sendfile(src_fd, dst_fd, 0, src_st.st_size) < 0) {
-		err("sendfile failed, error %d", errno);
-		return errno;
-	}
-	return 0;
-}
-
-void close_backend_file(int fd)
-{
-	close(fd);
+	return NULL;
 }
 
 int main(int argc, char **argv)
 {
 	int i;
 	int fanotify_fd;
+	struct backend *be;
 
 	logfd = stdout;
 
-	while ((i = getopt(argc, argv, "b:c:d:p:")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:d:o:")) != -1) {
 		switch (i) {
 		case 'b':
-			if (strcmp(optarg, "file")) {
-				fprintf(stderr, "Invalid backend '%s'\n",
-					optarg);
+			be = select_backend(optarg);
+			if (!be) {
+				err("Invalid backend '%s'\n", optarg);
 				return EINVAL;
 			}
 			break;
@@ -202,8 +133,11 @@ int main(int argc, char **argv)
 				exit(1);
 			}
 			break;
-		case 'p':
-			strncpy(file_backend_prefix, optarg, FILENAME_MAX);
+		case 'o':
+			if (be->parse_options(be, optarg) < 0) {
+				err("Invalid backend option '%s'", optarg);
+				return EINVAL;
+			}
 			break;
 		default:
 			fprintf(stderr, "usage: %s [-d <dir>]\n", argv[0]);
@@ -212,10 +146,6 @@ int main(int argc, char **argv)
 	}
 	if (optind < argc) {
 		fprintf(stderr, "usage: %s [-b file] [-p <dir>]\n", argv[0]);
-		return EINVAL;
-	}
-	if ('\0' == file_backend_prefix[0]) {
-		fprintf(stderr, "No file backend prefix given\n");
 		return EINVAL;
 	}
 
@@ -231,11 +161,11 @@ int main(int argc, char **argv)
 
 	daemon_thr = pthread_self();
 
-	watcher_thr = start_watcher(fanotify_fd);
+	watcher_thr = start_watcher(be, fanotify_fd);
 	if (!watcher_thr)
 		return errno;
 
-	cli_thr = start_cli(fanotify_fd);
+	cli_thr = start_cli(be, fanotify_fd);
 	if (!cli_thr) {
 		stop_watcher(watcher_thr);
 		return ENOMEM;

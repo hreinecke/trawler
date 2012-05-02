@@ -3,8 +3,8 @@
 
 PRG = dredger
 
-SRCS = dredger.c watcher.c cli.c
-OBJS = dredger.o watcher.o cli.o
+SRCS = dredger.c watcher.c cli.c backend-file.c
+OBJS = dredger.o watcher.o cli.o backend-file.o
 
 CFLAGS = -Wall -g -D_GNU_SOURCE
 

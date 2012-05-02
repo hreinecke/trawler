@@ -23,6 +23,7 @@
 #include "list.h"
 #include "logging.h"
 #include "dredger.h"
+#include "backend.h"
 
 pthread_mutex_t event_lock= PTHREAD_MUTEX_INITIALIZER;
 LIST_HEAD(event_list);
@@ -44,10 +45,17 @@ enum migrate_state {
 struct migrate_event {
 	struct list_head next;
 	pthread_t thr;
+	struct backend *be;
 	int fanotify_fd;
 	char pathname[FILENAME_MAX];
 	enum migrate_state state;
 	struct fanotify_event_metadata fa;
+};
+
+struct watcher_context {
+	pthread_t thread;
+	int fanotify_fd;
+	struct backend *be;
 };
 
 int get_fname(int fd, char *fname)
@@ -63,7 +71,7 @@ int get_fname(int fd, char *fname)
 	return len;
 }
 
-struct migrate_event *malloc_migrate_event(int fd)
+struct migrate_event *malloc_migrate_event(struct backend *be, int fd)
 {
 	struct migrate_event *event;
 
@@ -75,6 +83,7 @@ struct migrate_event *malloc_migrate_event(int fd)
 	memset(event, 0, sizeof(struct migrate_event));
 	INIT_LIST_HEAD(&event->next);
 	event->fanotify_fd = fd;
+	event->be = be;
 	return event;
 }
 
@@ -96,9 +105,9 @@ void free_migrate_event(void *arg)
 			resp.response = FAN_ALLOW;
 		if (write(event->fanotify_fd, &resp, sizeof(resp)) < 0) {
 			err("watcher: Failed to write fanotify "
-			    "response: error %d\n", errno);
+			    "response: error %d", errno);
 		} else {
-			dbg("watcher: Wrote response '%s'\n",
+			dbg("watcher: Wrote response '%s'",
 			       (resp.response == FAN_ALLOW) ?
 			       "FAN_ALLOW" : "FAN_DENY");
 		}
@@ -110,14 +119,20 @@ void free_migrate_event(void *arg)
 	free(event);
 }
 
-int migrate_file(int fanotify_fd, char *filename)
+int migrate_file(struct backend *be, int fanotify_fd, char *filename)
 {
 	struct migrate_event *event, *tmp;
-	int migrate_fd;
+	int migrate_fd, src_fd;
 	enum migrate_state state;
 	int ret;
 
-	event = malloc_migrate_event(fanotify_fd);
+	src_fd = open(filename, O_RDWR);
+	if (src_fd < 0) {
+		err("Cannot open source file '%s', error %d",
+		    filename, errno);
+		return errno;
+	}
+	event = malloc_migrate_event(be, fanotify_fd);
 	if (!event) {
 		err("Cannot allocate event, error %d", errno);
 		return errno;
@@ -140,7 +155,7 @@ int migrate_file(int fanotify_fd, char *filename)
 	list_add(&event->next, &event_list);
 	pthread_mutex_unlock(&event_lock);
 
-	migrate_fd = open_backend_file(event->pathname);
+	migrate_fd = open_backend(event->be, event->pathname);
 	if (migrate_fd < 0) {
 		err("failed to open backend file %s, error %d",
 		    event->pathname, errno);
@@ -153,11 +168,12 @@ int migrate_file(int fanotify_fd, char *filename)
 	if (state == MIGRATE_ABORTED) {
 		info("migration on file %s aborted",
 		     event->pathname);
-		close_backend_file(migrate_fd);
+		close_backend(event->be, event->pathname, migrate_fd);
 		ret = EINTR;
 		goto out;
 	}
-	ret = migrate_backend_file(event->fa.fd, migrate_fd);
+	info("start migration on file '%s'", event->pathname);
+	ret = migrate_backend(event->be, migrate_fd, src_fd);
 	pthread_mutex_lock(&event_lock);
 	if (event->state == MIGRATE_ABORTED) {
 		info("migration on file %s aborted", event->pathname);
@@ -166,10 +182,11 @@ int migrate_file(int fanotify_fd, char *filename)
 		    event->pathname, ret);
 		event->state = MIGRATE_FAILED;
 	} else {
+		info("finished migration on file '%s'", event->pathname);
 		event->state = MIGRATE_DONE;
 	}
 	pthread_mutex_unlock(&event_lock);
-	close_backend_file(migrate_fd);
+	close_backend(event->be, event->pathname, migrate_fd);
 	if (event->state == MIGRATE_DONE) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_ADD,
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
@@ -177,8 +194,10 @@ int migrate_file(int fanotify_fd, char *filename)
 		if (ret < 0) {
 			err("failed to add fanotify mark "
 			    "to %s, error %d\n", event->pathname, errno);
+			ret = -ret;
+		} else {
+			info("Added fanotify mark on '%s'", event->pathname);
 		}
-		ret = -ret;
 	}
 out:
 	pthread_mutex_lock(&event_lock);
@@ -195,22 +214,24 @@ void * unmigrate_file(void *arg)
 
 	pthread_cleanup_push(free_migrate_event, (void *)event);
 	event->state = UNMIGRATE_OPEN;
-	migrate_fd = open_backend_file(event->pathname);
+	migrate_fd = open_backend(event->be, event->pathname);
 	if (!migrate_fd) {
 		err("failed to open backend file %s, error %d",
 		    event->pathname, errno);
 		goto out;
 	}
+	info("start un-migration on file '%s'", event->pathname);
 	event->state = UNMIGRATE_BUSY;
-	ret = unmigrate_backend_file(event->fa.fd, migrate_fd);
+	ret = unmigrate_backend(event->be, event->fa.fd, migrate_fd);
 	if (ret < 0) {
 		err("failed to unmigrate file %s, error %d",
 			event->pathname, ret);
 		event->state = UNMIGRATE_FAILED;
 	} else {
+		info("finished un-migration on file '%s'", event->pathname);
 		event->state = UNMIGRATE_DONE;
 	}
-	close_backend_file(migrate_fd);
+	close_backend(event->be, event->pathname, migrate_fd);
 	if (event->state == UNMIGRATE_DONE) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_REMOVE,
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
@@ -225,25 +246,33 @@ out:
 	return NULL;
 }
 
+void cleanup_context(void * arg)
+{
+	struct watcher_context *ctx = arg;
+
+	free(ctx);
+}
+
 void * watch_fanotify(void * arg)
 {
-	int fanotify_fd = *(int *)arg;
+	struct watcher_context *ctx = arg;
 	fd_set rfd;
 	struct timeval tmo;
 	int i = 0;
 	struct migrate_event *event;
 
-	event = malloc_migrate_event(fanotify_fd);
+	pthread_cleanup_push(cleanup_context, ctx);
+	event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
 
 	while (!daemon_stopped) {
 		struct migrate_event *tmp;
 		int rlen, ret;
 
 		FD_ZERO(&rfd);
-		FD_SET(fanotify_fd, &rfd);
+		FD_SET(ctx->fanotify_fd, &rfd);
 		tmo.tv_sec = 5;
 		tmo.tv_usec = 0;
-		ret = select(fanotify_fd + 1, &rfd, NULL, NULL, &tmo);
+		ret = select(ctx->fanotify_fd + 1, &rfd, NULL, NULL, &tmo);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -254,12 +283,12 @@ void * watch_fanotify(void * arg)
 			dbg("watcher: select timeout");
 			continue;
 		}
-		if (!FD_ISSET(fanotify_fd, &rfd)) {
+		if (!FD_ISSET(ctx->fanotify_fd, &rfd)) {
 			err("select returned for invalid fd");
 			continue;
 		}
 
-		rlen = read(fanotify_fd, &event->fa,
+		rlen = read(ctx->fanotify_fd, &event->fa,
 			    sizeof(struct fanotify_event_metadata));
 		if (rlen < 0) {
 			err("error %d on reading fanotify event", errno);
@@ -303,27 +332,37 @@ void * watch_fanotify(void * arg)
 			err("Failed to start thread, error %d", errno);
 			free_migrate_event(event);
 		}
-		event = malloc_migrate_event(fanotify_fd);
+		event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
 		i++;
 	}
+	pthread_cleanup_pop(1);
 	return NULL;
 }
 
-pthread_t start_watcher(void)
+pthread_t start_watcher(struct backend *be, int fanotify_fd)
 {
-	pthread_t watcher_thr;
-	int retval, fanotify_fd;
+	int retval;
+	struct watcher_context *ctx;
 
-	retval = pthread_create(&watcher_thr, NULL,
-				watch_fanotify, &fanotify_fd);
+	ctx = malloc(sizeof(struct watcher_context));
+	if (!ctx) {
+		err("Failed to allocate watcher context");
+		return (pthread_t)0;
+	}
+	ctx->be = be;
+	ctx->fanotify_fd = fanotify_fd;
+
+	retval = pthread_create(&ctx->thread, NULL,
+				watch_fanotify, ctx);
 	if (retval) {
 		err("Failed to start fanotify watcher, error %d", retval);
+		free(ctx);
 		errno = retval;
 		return (pthread_t)0;
 	}
 	info("Started fanotify watcher");
 
-	return watcher_thr;
+	return ctx->thread;
 }
 
 int stop_watcher(pthread_t watcher_thr)

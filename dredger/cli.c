@@ -19,12 +19,14 @@
 #include <pthread.h>
 
 #include "logging.h"
+#include "backend.h"
 #include "dredger.h"
 #include "watcher.h"
 
 struct cli_monitor {
 	int running;
 	int sock;
+	struct backend *be;
 	int fanotify_fd;
 	pthread_t thread;
 };
@@ -33,12 +35,14 @@ void cli_monitor_cleanup(void *ctx)
 {
 	struct cli_monitor *cli = ctx;
 
+	info("Shutdown cli monitor");
 	if (cli->sock >= 0) {
 		close(cli->sock);
 		cli->sock = 0;
 	}
 	cli->thread = 0;
 	cli->running = 0;
+	free(cli);
 }
 
 void *cli_monitor_thread(void *ctx)
@@ -137,7 +141,7 @@ void *cli_monitor_thread(void *ctx)
 				iov.iov_len = 1;
 				goto send_msg;
 			}
-			ret = migrate_file(cli->fanotify_fd, filestr);
+			ret = migrate_file(cli->be, cli->fanotify_fd, filestr);
 			if (ret) {
 				buf[0] = ret;
 				iov.iov_len = 1;
@@ -148,7 +152,7 @@ void *cli_monitor_thread(void *ctx)
 			goto send_msg;
 		}
 		if (!strcmp(event, "Check")) {
-			if (check_backend_file(filestr) < 0) {
+			if (check_backend(cli->be, filestr) < 0) {
 				info("File '%s' not watched", filestr);
 				buf[0] = ENODEV;
 				iov.iov_len = 1;
@@ -166,12 +170,11 @@ void *cli_monitor_thread(void *ctx)
 		if (sendmsg(cli->sock, &smsg, 0) < 0)
 			err("sendmsg failed, error %d", errno);
 	}
-	info("shutdown cli monitor");
 	pthread_cleanup_pop(1);
 	return ((void *)0);
 }
 
-pthread_t start_cli(int fanotify_fd)
+pthread_t start_cli(struct backend *be, int fanotify_fd)
 {
 	struct cli_monitor *cli;
 	struct sockaddr_un sun;
@@ -184,6 +187,7 @@ pthread_t start_cli(int fanotify_fd)
 	cli = malloc(sizeof(struct cli_monitor));
 	memset(cli, 0, sizeof(struct cli_monitor));
 	cli->fanotify_fd = fanotify_fd;
+	cli->be = be;
 
 	memset(&sun, 0x00, sizeof(struct sockaddr_un));
 	sun.sun_family = AF_LOCAL;
