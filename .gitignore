@@ -1,0 +1,8 @@
+#
+#
+#
+dredger/dredger
+trawler/trawler
+*.o
+*~
+
