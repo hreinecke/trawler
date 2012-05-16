@@ -84,19 +84,8 @@ struct migrate_event *malloc_migrate_event(struct backend *be, int fd)
 	return event;
 }
 
-void free_migrate_event(void *arg)
+void free_migrate_event(struct migrate_event *event)
 {
-	struct migrate_event *event = arg;
-
-	pthread_mutex_unlock(&event->lock);
-
-	/* De-thread from list */
-	if (!list_empty(&event->next)) {
-		pthread_mutex_lock(&event_lock);
-		list_del_init(&event->next);
-		pthread_mutex_unlock(&event_lock);
-	}
-
 	if (event->fa.mask & FAN_ACCESS_PERM) {
 		struct fanotify_response resp;
 
@@ -120,6 +109,23 @@ void free_migrate_event(void *arg)
 	}
 	pthread_mutex_destroy(&event->lock);
 	free(event);
+}
+
+void cleanup_migrate_event(void *arg)
+{
+	struct migrate_event *event = arg;
+
+	event->thr = (pthread_t)0;
+	pthread_mutex_unlock(&event->lock);
+
+	/* De-thread from list */
+	if (!list_empty(&event->next)) {
+		pthread_mutex_lock(&event_lock);
+		list_del_init(&event->next);
+		pthread_mutex_unlock(&event_lock);
+	}
+
+	free_migrate_event(event);
 }
 
 int migrate_file(struct backend *be, int fanotify_fd, char *filename)
@@ -210,6 +216,9 @@ int migrate_file(struct backend *be, int fanotify_fd, char *filename)
 	}
 	close_backend(event->be, event->pathname, migrate_fd);
 	pthread_mutex_unlock(&event->lock);
+	pthread_mutex_lock(&event_lock);
+	list_del_init(&event->next);
+	pthread_mutex_unlock(&event_lock);
 	if (!event->error) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_ADD,
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
@@ -224,7 +233,6 @@ int migrate_file(struct backend *be, int fanotify_fd, char *filename)
 		}
 	}
 out:
-	pthread_mutex_lock(&event->lock);
 	free_migrate_event(event);
 	return ret;
 }
@@ -236,7 +244,7 @@ void * unmigrate_file(void *arg)
 
 	pthread_mutex_lock(&event->lock);
 	if (event->thr != (pthread_t)0)
-		pthread_cleanup_push(free_migrate_event, (void *)event);
+		pthread_cleanup_push(cleanup_migrate_event, (void *)event);
 	migrate_fd = open_backend(event->be, event->pathname);
 	if (!migrate_fd) {
 		err("failed to open backend file %s, error %d",
@@ -363,7 +371,9 @@ void * watch_fanotify(void * arg)
 		ret = pthread_create(&event->thr, NULL, unmigrate_file, event);
 		if (ret < 0) {
 			err("Failed to start thread, error %d", errno);
-			pthread_mutex_lock(&event->lock);
+			pthread_mutex_lock(&event_lock);
+			list_del_init(&event->next);
+			pthread_mutex_unlock(&event_lock);
 			free_migrate_event(event);
 		}
 		event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
@@ -410,7 +420,7 @@ int stop_watcher(pthread_t watcher_thr)
 int check_watcher(char *pathname)
 {
 	struct migrate_event *event = NULL, *tmp;
-	int ret;
+	int ret = 0;
 
 	pthread_mutex_lock(&event_lock);
 	list_for_each_entry(tmp, &event_list, next) {

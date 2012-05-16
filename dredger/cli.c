@@ -135,10 +135,18 @@ void *cli_monitor_thread(void *ctx)
 		info("CLI event '%s' file '%s'", event, filestr);
 
 		if (!strcmp(event, "Migrate")) {
-			if (check_watcher(filestr) == EBUSY) {
-				info("File '%s' under un-migration", filestr);
+			ret = check_watcher(filestr);
+			if (ret) {
+				info("File '%s' busy, error %d", filestr, ret);
 				buf[0] = EBUSY;
 				iov.iov_len = 1;
+				goto send_msg;
+			}
+			ret = check_backend(cli->be, filestr);
+			if (ret) {
+				info("File '%s' already migrated", filestr);
+				buf[0] = 0;
+				iov.iov_len = 0;
 				goto send_msg;
 			}
 			ret = migrate_file(cli->be, cli->fanotify_fd, filestr);
