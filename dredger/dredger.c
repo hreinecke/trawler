@@ -17,7 +17,7 @@
 #include <sys/syslog.h>
 #include <stdarg.h>
 #include "fanotify.h"
-#include "fanotify-syscall.h"
+#include "fanotify-init-syscall.h"
 #include "list.h"
 #include "logging.h"
 #include "backend.h"
