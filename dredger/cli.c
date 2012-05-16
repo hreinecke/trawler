@@ -143,10 +143,10 @@ void *cli_monitor_thread(void *ctx)
 				goto send_msg;
 			}
 			ret = check_backend(cli->be, filestr);
-			if (ret) {
+			if (!ret) {
 				info("File '%s' already migrated", filestr);
-				buf[0] = 0;
-				iov.iov_len = 0;
+				buf[0] = EEXIST;
+				iov.iov_len = 1;
 				goto send_msg;
 			}
 			ret = migrate_file(cli->be, cli->fanotify_fd, filestr);
