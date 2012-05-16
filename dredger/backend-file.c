@@ -98,12 +98,28 @@ int check_backend_file(struct backend *be, char *fname)
 	struct backend_file_options *opts = be->options;
 	char buf[FILENAME_MAX];
 	struct stat st;
+	struct tm dtm;
 
+	if (stat(fname, &st) < 0) {
+		err("file '%s' not accessible, error %d", fname, errno);
+		return errno;
+	}
+	if (gmtime_r(&st.st_atime, &dtm)) {
+		info("Target file '%s', size %d, tstamp "
+		     "%04d%02d%02d-%02d%02d%02d", fname, st.st_size,
+		     dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
+		     dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
+	}
 	strcpy(buf, opts->prefix);
 	strcat(buf, fname);
 	if (stat(buf, &st) < 0)
 		return errno;
-
+	if (gmtime_r(&st.st_atime, &dtm)) {
+		info("Backend file '%s', size %d, tstamp "
+		     "%04d%02d%02d-%02d%02d%02d", buf, st.st_size,
+		     dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
+		     dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
+	}
 	return 0;
 }
 
@@ -138,13 +154,6 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	if (fchown(be_fd, orig_st.st_uid, orig_st.st_gid) < 0) {
 		err("cannot update file owner, error %d", errno);
 	}
-	tv[0].tv_sec = difftime(orig_st.st_atime, 0);
-	tv[0].tv_usec = 0;
-	tv[1].tv_sec = difftime(orig_st.st_mtime, 0);
-	tv[1].tv_usec = 0;
-	if (futimes(be_fd, tv) < 0) {
-		err("cannot update file timestamps, error %d", errno);
-	}
 	if (ftruncate(orig_fd, 0) < 0) {
 		err("ftruncate failed, error %d", errno);
 		return errno;
@@ -159,12 +168,20 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	}
 	if (write(orig_fd, "\0", 1) < 1)
 		err("Cannot create sparse file, error %d", errno);
+	tv[0].tv_sec = difftime(orig_st.st_atime, 0);
+	tv[0].tv_usec = 0;
+	tv[1].tv_sec = difftime(orig_st.st_mtime, 0);
+	tv[1].tv_usec = 0;
+	if (futimes(be_fd, tv) < 0) {
+		err("cannot update file timestamps, error %d", errno);
+	}
 	return 0;
 }
 
 int unmigrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 {
 	struct stat orig_st, be_st;
+	struct timeval tv[2];
 
 	if (fstat(be_fd, &be_st) < 0) {
 		err("Cannot stat backend fd, error %d", errno);
@@ -185,6 +202,13 @@ int unmigrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	if (sendfile(be_fd, orig_fd, 0, be_st.st_size) < 0) {
 		err("sendfile failed, error %d", errno);
 		return errno;
+	}
+	tv[0].tv_sec = difftime(be_st.st_atime, 0);
+	tv[0].tv_usec = 0;
+	tv[1].tv_sec = difftime(be_st.st_mtime, 0);
+	tv[1].tv_usec = 0;
+	if (futimes(orig_fd, tv) < 0) {
+		err("cannot update file timestamps, error %d", errno);
 	}
 	return 0;
 }
