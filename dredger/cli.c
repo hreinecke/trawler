@@ -118,7 +118,7 @@ void *cli_monitor_thread(void *ctx)
 			}
 		}
 
-		if (src_uid != 0 || src_fd < 0) {
+		if (src_uid != 0) {
 			warn("Invalid message (uid=%d, fd %d), ignoring",
 			     src_uid, src_fd);
 			continue;
@@ -132,7 +132,8 @@ void *cli_monitor_thread(void *ctx)
 			     cli_cmd);
 			cli_cmd = CLI_NOFILE;
 		}
-		info("CLI event '%d' file %d '%s'", cli_cmd, src_fd, filestr);
+		info("CLI event '%d' fd %d file '%s'", cli_cmd,
+		     src_fd, filestr);
 
 		switch (cli_cmd) {
 		case CLI_NOFILE:
@@ -238,7 +239,8 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 	struct sockaddr_un sun, local;
 	socklen_t addrlen;
 	struct msghdr smsg;
-	char cred_msg[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
+	char *cred_msg;
+	int cred_msglen;
 	struct cmsghdr *cmsg;
 	struct ucred *cred;
 	struct iovec iov;
@@ -275,14 +277,18 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 	iov.iov_base = cmd;
 	iov.iov_len = strlen(filename) + 2;
 
+	cred_msglen = CMSG_SPACE(sizeof(struct ucred));
+	if (src_fd >= 0)
+		cred_msglen += CMSG_SPACE(sizeof(int));
+	cred_msg = malloc(cred_msglen);
 	memset(&smsg, 0x00, sizeof(struct msghdr));
 	smsg.msg_name = &sun;
 	smsg.msg_namelen = addrlen;
 	smsg.msg_iov = &iov;
 	smsg.msg_iovlen = 1;
 	smsg.msg_control = cred_msg;
-	smsg.msg_controllen = sizeof(cred_msg);
-	memset(cred_msg, 0, sizeof(cred_msg));
+	smsg.msg_controllen = cred_msglen;
+	memset(cred_msg, 0, cred_msglen);
 
 	cmsg = CMSG_FIRSTHDR(&smsg);
 	cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
@@ -294,15 +300,18 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 	cred->uid = getuid();
 	cred->gid = getgid();
 
-	cmsg = CMSG_NXTHDR(&smsg, cmsg);
-	if (!cmsg) {
-		err("sendmsg failed, not enough message headers");
-		return 6;
+	if (src_fd >= 0) {
+		cmsg = CMSG_NXTHDR(&smsg, cmsg);
+		if (!cmsg) {
+			err("sendmsg failed, not enough message headers");
+			free(cred_msg);
+			return 6;
+		}
+		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+		*(int *)CMSG_DATA(cmsg) = src_fd;
 	}
-	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-	cmsg->cmsg_level = SOL_SOCKET;
-	cmsg->cmsg_type = SCM_RIGHTS;
-	*(int *)CMSG_DATA(cmsg) = src_fd;
 	err("send msg '%d' fd '%d' filename '%s'",
 	     cli_cmd, src_fd, filename);
 	if (sendmsg(cli_sock, &smsg, 0) < 0) {
@@ -311,6 +320,7 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 		} else {
 			err("sendmsg failed, error %d", errno);
 		}
+		free(cred_msg);
 		return 5;
 	}
 
@@ -332,7 +342,7 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 		printf("%s\n", buf);
 		status = 0;
 	}
-
+	free(cred_msg);
 	close(cli_sock);
 	return status;
 }
@@ -342,7 +352,7 @@ int cli_command(enum cli_commands cli_cmd, char *filename)
 	int src_fd = -1, ret;
 	struct flock lock;
 
-	if (filename) {
+	if (filename && cli_cmd == CLI_MIGRATE) {
 		src_fd = open(filename, O_RDWR);
 		if (src_fd < 0) {
 			err("Cannot open source file '%s', error %d",
