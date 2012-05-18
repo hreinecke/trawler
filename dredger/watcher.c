@@ -27,18 +27,13 @@
 
 #define LOG_AREA "watcher"
 
-pthread_mutex_t event_lock= PTHREAD_MUTEX_INITIALIZER;
-LIST_HEAD(event_list);
-
 enum migrate_direction {
 	MIGRATE_OUT,
 	MIGRATE_IN,
 };
 
 struct migrate_event {
-	struct list_head next;
 	pthread_t thr;
-	pthread_mutex_t lock;
 	struct backend *be;
 	int fanotify_fd;
 	char pathname[FILENAME_MAX];
@@ -76,8 +71,6 @@ struct migrate_event *malloc_migrate_event(struct backend *be, int fd)
 		return NULL;
 	}
 	memset(event, 0, sizeof(struct migrate_event));
-	INIT_LIST_HEAD(&event->next);
-	pthread_mutex_init(&event->lock, NULL);
 	event->fanotify_fd = fd;
 	event->be = be;
 	event->direction = MIGRATE_IN;
@@ -107,7 +100,6 @@ void free_migrate_event(struct migrate_event *event)
 		close(event->fa.fd);
 		event->fa.fd = 0;
 	}
-	pthread_mutex_destroy(&event->lock);
 	free(event);
 }
 
@@ -300,24 +292,4 @@ int stop_watcher(pthread_t watcher_thr)
 	pthread_join(watcher_thr, NULL);
 	info("Stopped fanotify watcher");
 	return 0;
-}
-
-int check_watcher(char *pathname)
-{
-	struct migrate_event *event = NULL, *tmp;
-	int ret = 0;
-
-	pthread_mutex_lock(&event_lock);
-	list_for_each_entry(tmp, &event_list, next) {
-		if (!strcmp(tmp->pathname, pathname)) {
-			ret = pthread_mutex_trylock(&event->lock);
-			if (!ret) {
-				ret = event->error;
-				pthread_mutex_unlock(&event->lock);
-			}
-			break;
-		}
-	}
-	pthread_mutex_unlock(&event_lock);
-	return ret;
 }
