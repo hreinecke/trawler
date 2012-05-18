@@ -7,7 +7,8 @@ enum cli_commands {
     CLI_NONE,
     CLI_SHUTDOWN,
     CLI_MIGRATE,
-    CLI_CHECK
+    CLI_CHECK,
+    CLI_NOFILE,
 };
 
 pthread_t start_cli(struct backend *be, int fanotify_fd);

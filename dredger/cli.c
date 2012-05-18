@@ -66,8 +66,8 @@ void *cli_monitor_thread(void *ctx)
 		char cred_msg[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
 		struct cmsghdr *cmsg;
 		struct ucred *cred;
-		int *intvec;
-		enum cli_commands cli_cmd = CLI_MIGRATE;
+		enum cli_commands cli_cmd;
+		char *filestr;
 		static char buf[1024];
 		struct sockaddr_un sun;
 		socklen_t addrlen;
@@ -95,7 +95,6 @@ void *cli_monitor_thread(void *ctx)
 		smsg.msg_controllen = sizeof(cred_msg);
 
 		buflen = recvmsg(cli->sock, &smsg, 0);
-
 		if (buflen < 0) {
 			if (errno != EINTR)
 				err("error receiving cli message, errno %d",
@@ -126,33 +125,29 @@ void *cli_monitor_thread(void *ctx)
 		}
 		info("received %d/%d bytes from %s", buflen, sizeof(buf),
 		     &sun.sun_path[1]);
+		cli_cmd = buf[0];
+		filestr = buf + 1;
+		if (cli_cmd != CLI_SHUTDOWN && !strlen(filestr)) {
+			info("%s: skipping event '%d', no file specified",
+			     cli_cmd);
+			cli_cmd = CLI_NOFILE;
+		}
+		info("CLI event '%d' file %d '%s'", cli_cmd, src_fd, filestr);
 
-		if (cli_cmd == CLI_SHUTDOWN) {
+		switch (cli_cmd) {
+		case CLI_NOFILE:
+			buf[0] = ENODEV;
+			iov.iov_len = 1;
+			break;
+		case CLI_SHUTDOWN:
 			pthread_kill(daemon_thr, SIGTERM);
 			cli->running = 0;
 			buf[0] = 0;
 			iov.iov_len = 0;
-			goto send_msg;
-		}
-		if (!strlen(buf)) {
-			info("%s: skipping event '%d', no file specified",
-			     cli_cmd);
-			buf[0] = ENODEV;
-			iov.iov_len = 1;
-			goto send_msg;
-		}
-		info("CLI event '%d' file %d '%s'", cli_cmd, src_fd, buf);
-
-		if (cli_cmd == CLI_MIGRATE) {
-			ret = check_backend(cli->be, buf);
-			if (!ret) {
-				info("File '%s' already migrated", buf);
-				buf[0] = EEXIST;
-				iov.iov_len = 1;
-				goto send_msg;
-			}
+			break;
+		case CLI_MIGRATE:
 			ret = migrate_file(cli->be, cli->fanotify_fd,
-					   src_fd, buf);
+					   src_fd, filestr);
 			if (ret) {
 				buf[0] = ret;
 				iov.iov_len = 1;
@@ -160,24 +155,24 @@ void *cli_monitor_thread(void *ctx)
 				buf[0] = 0;
 				iov.iov_len = 0;
 			}
-			goto send_msg;
-		}
-		if (cli_cmd == CLI_CHECK) {
-			if (check_backend(cli->be, buf) < 0) {
-				info("File '%s' not watched", buf);
+			break;
+		case CLI_CHECK:
+			if (check_backend(cli->be, filestr) < 0) {
+				info("File '%s' not watched", filestr);
 				buf[0] = ENODEV;
 				iov.iov_len = 1;
 			} else {
 				buf[0] = 0;
 				iov.iov_len = 0;
 			}
-			goto send_msg;
+			break;
+		default:
+			info("%s: Unhandled event %d",filestr, cli_cmd);
+			buf[0] = EINVAL;
+			iov.iov_len = 1;
+			break;
 		}
-		info("%s: Unhandled event", buf);
-		buf[0] = EINVAL;
-		iov.iov_len = 1;
 
-	send_msg:
 		if (sendmsg(cli->sock, &smsg, 0) < 0)
 			err("sendmsg failed, error %d", errno);
 	}
@@ -247,9 +242,9 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 	struct cmsghdr *cmsg;
 	struct ucred *cred;
 	struct iovec iov;
-	int *intvec;
 	int cli_sock, feature_on = 1;
 	char buf[1024];
+	char cmd[1024];
 	int buflen;
 	char status;
 
@@ -275,8 +270,10 @@ int cli_send_command(int cli_cmd, char *filename, int src_fd)
 	addrlen = offsetof(struct sockaddr_un, sun_path) +
 		strlen(sun.sun_path + 1) + 1;
 	memset(&iov, 0, sizeof(iov));
-	iov.iov_base = filename;
-	iov.iov_len = strlen(filename) + 1;
+	cmd[0] = cli_cmd;
+	strcpy(cmd + 1, filename);
+	iov.iov_base = cmd;
+	iov.iov_len = strlen(filename) + 2;
 
 	memset(&smsg, 0x00, sizeof(struct msghdr));
 	smsg.msg_name = &sun;
