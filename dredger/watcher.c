@@ -27,17 +27,11 @@
 
 #define LOG_AREA "watcher"
 
-enum migrate_direction {
-	MIGRATE_OUT,
-	MIGRATE_IN,
-};
-
 struct migrate_event {
 	pthread_t thr;
 	struct backend *be;
 	int fanotify_fd;
 	char pathname[FILENAME_MAX];
-	enum migrate_direction direction;
 	int error;
 	struct fanotify_event_metadata fa;
 };
@@ -46,6 +40,7 @@ struct watcher_context {
 	pthread_t thread;
 	int fanotify_fd;
 	struct backend *be;
+	struct migrate_event *event;
 };
 
 int get_fname(int fd, char *fname)
@@ -73,7 +68,6 @@ struct migrate_event *malloc_migrate_event(struct backend *be, int fd)
 	memset(event, 0, sizeof(struct migrate_event));
 	event->fanotify_fd = fd;
 	event->be = be;
-	event->direction = MIGRATE_IN;
 	return event;
 }
 
@@ -98,7 +92,7 @@ void free_migrate_event(struct migrate_event *event)
 	}
 	if (event->fa.fd >= 0) {
 		close(event->fa.fd);
-		event->fa.fd = 0;
+		event->fa.fd = -1;
 	}
 	free(event);
 }
@@ -131,6 +125,8 @@ void * unmigrate_file(void *arg)
 		if (errno == EAGAIN ||
 		    errno == EACCES) {
 			/* Previous migration, wait for completion */
+			info("Lock contention on file '%s', wait for lock",
+			     event->pathname);
 		retry:
 			lock.l_type = F_WRLCK;
 			ret = fcntl(src_fd, F_SETLKW, &lock);
@@ -193,6 +189,8 @@ void cleanup_context(void * arg)
 {
 	struct watcher_context *ctx = arg;
 
+	if (ctx->event)
+		free_migrate_event(ctx->event);
 	free(ctx);
 }
 
@@ -205,7 +203,7 @@ void * watch_fanotify(void * arg)
 	struct migrate_event *event;
 
 	pthread_cleanup_push(cleanup_context, ctx);
-	event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
+	ctx->event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
 
 	while (!daemon_stopped) {
 		int rlen, ret;
@@ -229,7 +227,7 @@ void * watch_fanotify(void * arg)
 			err("select returned for invalid fd");
 			continue;
 		}
-
+		event = ctx->event;
 		rlen = read(ctx->fanotify_fd, &event->fa,
 			    sizeof(struct fanotify_event_metadata));
 		if (rlen < 0) {
@@ -246,14 +244,37 @@ void * watch_fanotify(void * arg)
 		}
 
 		dbg("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d",
-		       i, (unsigned long) event->fa.mask, event->fa.fd,
-		       event->pathname, event->fa.pid);
-		ret = pthread_create(&event->thr, NULL, unmigrate_file, event);
+		    i, (unsigned long) event->fa.mask, event->fa.fd,
+		    event->pathname, event->fa.pid);
+		ctx->event = NULL;
+		ret = pthread_create(&event->thr, NULL, unmigrate_file,
+				     event);
 		if (ret < 0) {
 			err("Failed to start thread, error %d", errno);
-			free_migrate_event(event);
-		}
-		event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
+			if (event->fa.mask & FAN_ACCESS_PERM) {
+				struct fanotify_response resp;
+
+				resp.fd = event->fa.fd;
+				resp.response = FAN_DENY;
+				if (write(event->fanotify_fd, &resp,
+					  sizeof(resp)) < 0) {
+					err("watcher: Failed to write "
+					    "fanotify response: error %d",
+					    errno);
+				} else {
+					dbg("watcher: Wrote response '%s'",
+					    (resp.response == FAN_ALLOW) ?
+					    "FAN_ALLOW" : "FAN_DENY");
+				}
+			}
+			if (event->fa.fd >= 0) {
+				close(event->fa.fd);
+				event->fa.fd = -1;
+			}
+			ctx->event = event;
+		} else
+			ctx->event = malloc_migrate_event(ctx->be,
+							  ctx->fanotify_fd);
 		i++;
 	}
 	pthread_cleanup_pop(1);
