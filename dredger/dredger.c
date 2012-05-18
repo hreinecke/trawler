@@ -110,7 +110,7 @@ struct backend *select_backend(const char *name) {
 int main(int argc, char **argv)
 {
 	int i;
-	int fanotify_fd;
+	int fanotify_fd, ret;
 	struct backend *be;
 
 	logfd = stdout;
@@ -136,6 +136,9 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'm':
+			ret = cli_command(CLI_CHECK, optarg);
+			if (ret)
+				return ret;
 			return cli_command(CLI_MIGRATE, optarg);
 			break;
 		case 'o':

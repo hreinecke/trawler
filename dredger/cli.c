@@ -137,7 +137,7 @@ void *cli_monitor_thread(void *ctx)
 
 		switch (cli_cmd) {
 		case CLI_NOFILE:
-			buf[0] = ENODEV;
+			buf[0] = EINVAL;
 			iov.iov_len = 1;
 			break;
 		case CLI_SHUTDOWN:
@@ -166,12 +166,12 @@ void *cli_monitor_thread(void *ctx)
 				iov.iov_len = 1;
 			} else if (ret > 0) {
 				info("File '%s' needs migration", filestr);
-				buf[0] = ENODEV;
-				iov.iov_len = 1;
-			} else {
-				info("File '%s' up-to-date", filestr);
 				buf[0] = 0;
 				iov.iov_len = 0;
+			} else {
+				info("File '%s' up-to-date", filestr);
+				buf[0] = EALREADY;
+				iov.iov_len = 1;
 			}
 			break;
 		default:
