@@ -14,47 +14,14 @@
 #include "backend.h"
 #include "migrate.h"
 
-int migrate_file(struct backend *be, int fanotify_fd, char *filename)
+#define LOG_AREA "migrate"
+
+int migrate_file(struct backend *be, int fanotify_fd, int src_fd,
+		 char *filename)
 {
-	int src_fd, migrate_fd;
-	struct flock lock;
+	int migrate_fd;
 	int ret;
 
-	src_fd = open(filename, O_RDWR);
-	if (src_fd < 0) {
-		err("Cannot open source file '%s', error %d",
-		    filename, errno);
-		return errno;
-	}
-	info("Locking file '%s'", filename);
-	lock.l_type = F_WRLCK;
-	lock.l_start = 0;
-	lock.l_whence = SEEK_SET;
-	lock.l_len = 0;
-	ret = fcntl(src_fd, F_SETLK, &lock);
-	if (ret) {
-		if (errno == EAGAIN ||
-		    errno == EACCES) {
-			ret = fcntl(src_fd, F_GETLK, &lock);
-			if (ret) {
-				err("Could not get lock on source file '%s', "
-				    "error %d", filename, errno);
-			} else {
-				/* Previous migration, wait for completion */
-				lock.l_type = F_WRLCK;
-				ret = fcntl(src_fd, F_SETLKW, &lock);
-				/* close() releases the lock */
-				close(src_fd);
-				return ret;
-			}
-		} else {
-			err("Cannot lock source file '%s', error %d",
-			    filename, errno);
-			close(src_fd);
-			return errno;
-		}
-	}
-	/* We could place the lock ok */
 	migrate_fd = open_backend(be, filename);
 	if (migrate_fd < 0) {
 		if (errno == EEXIST) {
@@ -63,7 +30,6 @@ int migrate_file(struct backend *be, int fanotify_fd, char *filename)
 			err("failed to open backend file %s, error %d",
 			    filename, errno);
 		}
-		close(src_fd);
 		return errno;
 	}
 	info("start migration on file '%s'", filename);
@@ -84,6 +50,5 @@ int migrate_file(struct backend *be, int fanotify_fd, char *filename)
 			ret = -ret;
 		}
 	}
-	close(src_fd);
 	return ret;
 }

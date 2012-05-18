@@ -19,6 +19,8 @@
 #include "logging.h"
 #include "backend.h"
 
+#define LOG_AREA "backend-file"
+
 struct backend_file_options {
 	char prefix[FILENAME_MAX];
 } file_options;
@@ -97,28 +99,38 @@ int check_backend_file(struct backend *be, char *fname)
 {
 	struct backend_file_options *opts = be->options;
 	char buf[FILENAME_MAX];
-	struct stat st;
+	struct stat src_st, backend_st;
 	struct tm dtm;
 
-	if (stat(fname, &st) < 0) {
-		err("file '%s' not accessible, error %d", fname, errno);
+	if (stat(fname, &src_st) < 0) {
+		err("Source file '%s' not accessible, error %d", fname, errno);
 		return errno;
 	}
-	if (gmtime_r(&st.st_atime, &dtm)) {
-		info("Target file '%s', size %d, tstamp "
-		     "%04d%02d%02d-%02d%02d%02d", fname, st.st_size,
+	if (gmtime_r(&src_st.st_atime, &dtm)) {
+		info("Source file '%s', size %d, tstamp "
+		     "%04d%02d%02d-%02d%02d%02d", fname, src_st.st_size,
 		     dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
 		     dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
 	}
 	strcpy(buf, opts->prefix);
 	strcat(buf, fname);
-	if (stat(buf, &st) < 0)
+	if (stat(buf, &backend_st) < 0)
 		return errno;
-	if (gmtime_r(&st.st_atime, &dtm)) {
+	if (gmtime_r(&backend_st.st_atime, &dtm)) {
 		info("Backend file '%s', size %d, tstamp "
-		     "%04d%02d%02d-%02d%02d%02d", buf, st.st_size,
+		     "%04d%02d%02d-%02d%02d%02d", buf, backend_st.st_size,
 		     dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
 		     dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
+	}
+	if (backend_st.st_size != src_st.st_size) {
+		info("Backend file '%s' has different size than source file",
+		     fname);
+		return ESTALE;
+	}
+	if (difftime(backend_st.st_atime, src_st.st_atime) < 0) {
+		info("Backend file '%s' older than source file",
+		     fname);
+		return ESTALE;
 	}
 	return 0;
 }

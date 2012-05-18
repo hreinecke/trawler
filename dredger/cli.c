@@ -9,7 +9,9 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/socket.h>
@@ -22,6 +24,9 @@
 #include "backend.h"
 #include "dredger.h"
 #include "migrate.h"
+#include "cli.h"
+
+#define LOG_AREA "cli"
 
 struct cli_monitor {
 	int running;
@@ -53,18 +58,20 @@ void *cli_monitor_thread(void *ctx)
 	pthread_cleanup_push(cli_monitor_cleanup, cli);
 
 	while (cli->running) {
-		int fdcount, ret;
+		int fdcount, ret, src_fd;
+		uid_t src_uid;
 		fd_set readfds;
 		struct msghdr smsg;
 		struct iovec iov;
-		char cred_msg[CMSG_SPACE(sizeof(struct ucred))];
+		char cred_msg[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
 		struct cmsghdr *cmsg;
 		struct ucred *cred;
+		int *intvec;
+		enum cli_commands cli_cmd = CLI_MIGRATE;
 		static char buf[1024];
 		struct sockaddr_un sun;
 		socklen_t addrlen;
 		size_t buflen;
-		char *event, *filestr;
 
 		FD_ZERO(&readfds);
 		FD_SET(cli->sock, &readfds);
@@ -95,47 +102,57 @@ void *cli_monitor_thread(void *ctx)
 				    errno);
 			continue;
 		}
-		cmsg = CMSG_FIRSTHDR(&smsg);
-		if (cmsg == NULL) {
-			warn("no cli credentials, ignore message");
-			continue;
+		src_fd = -1;
+		src_uid = -1;
+		for (cmsg = CMSG_FIRSTHDR(&smsg); cmsg != NULL;
+		     cmsg = CMSG_NXTHDR(&smsg, cmsg)) {
+			if (cmsg->cmsg_level != SOL_SOCKET)
+				continue;
+			switch (cmsg->cmsg_type) {
+			case SCM_CREDENTIALS:
+				cred = (struct ucred *)CMSG_DATA(cmsg);
+				src_uid = cred->uid;
+				break;
+			case SCM_RIGHTS:
+				src_fd = *(int *)CMSG_DATA(cmsg);
+				break;
+			}
 		}
-		if (cmsg->cmsg_type != SCM_CREDENTIALS) {
-			warn("invalid cli credentials %d/%d, ignore message",
-			     cmsg->cmsg_type, cmsg->cmsg_level);
-			continue;
-		}
-		cred = (struct ucred *)CMSG_DATA(cmsg);
-		if (cred->uid != 0) {
-			warn("sender uid=%d, ignore message", cred->uid);
+
+		if (src_uid != 0 || src_fd < 0) {
+			warn("Invalid message (uid=%d, fd %d), ignoring",
+			     src_uid, src_fd);
 			continue;
 		}
 		info("received %d/%d bytes from %s", buflen, sizeof(buf),
 		     &sun.sun_path[1]);
 
-		event = buf;
-		if (!strncmp(event, "Shutdown", 8)) {
+		if (cli_cmd == CLI_SHUTDOWN) {
 			pthread_kill(daemon_thr, SIGTERM);
 			cli->running = 0;
 			buf[0] = 0;
 			iov.iov_len = 0;
 			goto send_msg;
 		}
-		filestr = strchr(buf, ' ');
-		if (!filestr || !strlen(filestr)) {
-			info("%s: skipping event '%s', no file specified",
-			     buf);
+		if (!strlen(buf)) {
+			info("%s: skipping event '%d', no file specified",
+			     cli_cmd);
 			buf[0] = ENODEV;
 			iov.iov_len = 1;
 			goto send_msg;
-		} else {
-			*filestr = '\0';
-			filestr++;
 		}
-		info("CLI event '%s' file '%s'", event, filestr);
+		info("CLI event '%d' file %d '%s'", cli_cmd, src_fd, buf);
 
-		if (!strcmp(event, "Migrate")) {
-			ret = migrate_file(cli->be, cli->fanotify_fd, filestr);
+		if (cli_cmd == CLI_MIGRATE) {
+			ret = check_backend(cli->be, buf);
+			if (!ret) {
+				info("File '%s' already migrated", buf);
+				buf[0] = EEXIST;
+				iov.iov_len = 1;
+				goto send_msg;
+			}
+			ret = migrate_file(cli->be, cli->fanotify_fd,
+					   src_fd, buf);
 			if (ret) {
 				buf[0] = ret;
 				iov.iov_len = 1;
@@ -145,9 +162,9 @@ void *cli_monitor_thread(void *ctx)
 			}
 			goto send_msg;
 		}
-		if (!strcmp(event, "Check")) {
-			if (check_backend(cli->be, filestr) < 0) {
-				info("File '%s' not watched", filestr);
+		if (cli_cmd == CLI_CHECK) {
+			if (check_backend(cli->be, buf) < 0) {
+				info("File '%s' not watched", buf);
 				buf[0] = ENODEV;
 				iov.iov_len = 1;
 			} else {
@@ -221,15 +238,16 @@ void stop_cli(pthread_t cli_thr)
 	pthread_join(cli_thr, NULL);
 }
 
-int cli_command(char *cmd)
+int cli_send_command(int cli_cmd, char *filename, int src_fd)
 {
 	struct sockaddr_un sun, local;
 	socklen_t addrlen;
 	struct msghdr smsg;
-	char cred_msg[CMSG_SPACE(sizeof(struct ucred))];
+	char cred_msg[CMSG_SPACE(sizeof(struct ucred)) + CMSG_SPACE(sizeof(int))];
 	struct cmsghdr *cmsg;
 	struct ucred *cred;
 	struct iovec iov;
+	int *intvec;
 	int cli_sock, feature_on = 1;
 	char buf[1024];
 	int buflen;
@@ -257,8 +275,8 @@ int cli_command(char *cmd)
 	addrlen = offsetof(struct sockaddr_un, sun_path) +
 		strlen(sun.sun_path + 1) + 1;
 	memset(&iov, 0, sizeof(iov));
-	iov.iov_base = cmd;
-	iov.iov_len = strlen(cmd) + 1;
+	iov.iov_base = filename;
+	iov.iov_len = strlen(filename) + 1;
 
 	memset(&smsg, 0x00, sizeof(struct msghdr));
 	smsg.msg_name = &sun;
@@ -279,6 +297,17 @@ int cli_command(char *cmd)
 	cred->uid = getuid();
 	cred->gid = getgid();
 
+	cmsg = CMSG_NXTHDR(&smsg, cmsg);
+	if (!cmsg) {
+		err("sendmsg failed, not enough message headers");
+		return 6;
+	}
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	*(int *)CMSG_DATA(cmsg) = src_fd;
+	err("send msg '%d' fd '%d' filename '%s'",
+	     cli_cmd, src_fd, filename);
 	if (sendmsg(cli_sock, &smsg, 0) < 0) {
 		if (errno == ECONNREFUSED) {
 			err("sendmsg failed, md_monitor is not running");
@@ -311,3 +340,50 @@ int cli_command(char *cmd)
 	return status;
 }
 
+int cli_command(enum cli_commands cli_cmd, char *filename)
+{
+	int src_fd = -1, ret;
+	struct flock lock;
+
+	if (filename) {
+		src_fd = open(filename, O_RDWR);
+		if (src_fd < 0) {
+			err("Cannot open source file '%s', error %d",
+			    filename, errno);
+			return errno;
+		}
+		info("Locking file '%s'", filename);
+		lock.l_type = F_WRLCK;
+		lock.l_start = 0;
+		lock.l_whence = SEEK_SET;
+		lock.l_len = 0;
+		ret = fcntl(src_fd, F_SETLK, &lock);
+		if (ret) {
+			if (errno == EAGAIN ||
+			    errno == EACCES) {
+				ret = fcntl(src_fd, F_GETLK, &lock);
+				if (ret) {
+					err("Could not get lock on "
+					    "source file '%s', error %d",
+					    filename, errno);
+				} else {
+					/* Wait for completion */
+					lock.l_type = F_WRLCK;
+					ret = fcntl(src_fd, F_SETLKW, &lock);
+					/* close() releases the lock */
+					close(src_fd);
+					return ret;
+				}
+			} else {
+				err("Cannot lock source file '%s', error %d",
+				    filename, errno);
+				close(src_fd);
+				return errno;
+			}
+		}
+	}
+	ret = cli_send_command(cli_cmd, filename, src_fd);
+	if (src_fd >= 0)
+		close(src_fd);
+	return ret;
+}

@@ -24,6 +24,8 @@
 #include "watcher.h"
 #include "cli.h"
 
+#define LOG_AREA "watcher"
+
 pthread_cond_t exit_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t exit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -113,7 +115,7 @@ int main(int argc, char **argv)
 
 	logfd = stdout;
 
-	while ((i = getopt(argc, argv, "b:c:d:o:")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:d:m:o:s")) != -1) {
 		switch (i) {
 		case 'b':
 			be = select_backend(optarg);
@@ -123,7 +125,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'c':
-			return cli_command(optarg);
+			return cli_command(CLI_CHECK, optarg);
 			break;
 		case 'd':
 			log_priority = strtoul(optarg, NULL, 10);
@@ -133,11 +135,17 @@ int main(int argc, char **argv)
 				exit(1);
 			}
 			break;
+		case 'm':
+			return cli_command(CLI_MIGRATE, optarg);
+			break;
 		case 'o':
 			if (be->parse_options(be, optarg) < 0) {
 				err("Invalid backend option '%s'", optarg);
 				return EINVAL;
 			}
+			break;
+		case 's':
+			return cli_command(CLI_SHUTDOWN, NULL);
 			break;
 		default:
 			fprintf(stderr, "usage: %s [-d <dir>]\n", argv[0]);

@@ -25,6 +25,8 @@
 #include "dredger.h"
 #include "backend.h"
 
+#define LOG_AREA "watcher"
+
 pthread_mutex_t event_lock= PTHREAD_MUTEX_INITIALIZER;
 LIST_HEAD(event_list);
 
