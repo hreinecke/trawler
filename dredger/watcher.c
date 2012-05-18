@@ -51,8 +51,6 @@ struct watcher_context {
 	struct backend *be;
 };
 
-void * unmigrate_file(void *arg);
-
 int get_fname(int fd, char *fname)
 {
 	int len;
@@ -116,153 +114,73 @@ void cleanup_migrate_event(void *arg)
 	struct migrate_event *event = arg;
 
 	event->thr = (pthread_t)0;
-	pthread_mutex_unlock(&event->lock);
-
-	/* De-thread from list */
-	if (!list_empty(&event->next)) {
-		pthread_mutex_lock(&event_lock);
-		list_del_init(&event->next);
-		pthread_mutex_unlock(&event_lock);
-	}
-
 	free_migrate_event(event);
-}
-
-int migrate_file(struct backend *be, int fanotify_fd, char *filename)
-{
-	struct migrate_event *event, *tmp;
-	int migrate_fd, src_fd;
-	int ret;
-
-	src_fd = open(filename, O_RDWR);
-	if (src_fd < 0) {
-		err("Cannot open source file '%s', error %d",
-		    filename, errno);
-		return errno;
-	}
-	event = malloc_migrate_event(be, fanotify_fd);
-	if (!event) {
-		err("Cannot allocate event, error %d", errno);
-		return errno;
-	}
-	/*
-	 * Check for concurrent events
-	 */
-	pthread_mutex_lock(&event_lock);
-	list_for_each_entry(tmp, &event_list, next) {
-		if (!strcmp(tmp->pathname, filename)) {
-			ret = pthread_mutex_trylock(&tmp->lock);
-			if (!ret) {
-				/*
-				 * Another event with the same pathname
-				 * has finished. Don't try anything here.
-				 */
-				info("%s: found finished event, error %d",
-				     filename, tmp->error);
-				pthread_mutex_unlock(&tmp->lock);
-				pthread_mutex_unlock(&event_lock);
-				ret = EBUSY;
-				goto out;
-			} else if (ret == EBUSY) {
-				/*
-				 * Someone is working on it.
-				 * Ignore if it's an unmigration,
-				 * or wait for migration to complete.
-				 */
-				info("%s: found running %s event",
-				     filename, tmp->direction == MIGRATE_OUT ?
-				     "migrate" : "un-migrate");
-				if (tmp->direction == MIGRATE_OUT) {
-					pthread_mutex_lock(&tmp->lock);
-					ret = tmp->error;
-					pthread_mutex_unlock(&tmp->lock);
-				}
-				pthread_mutex_unlock(&event_lock);
-				goto out;
-			} else {
-				/*
-				 * Cannot get lock for whatever reason
-				 * Abort migration
-				 */
-				info("%s: trylock for event failed, error %d",
-				     filename, ret);
-				pthread_mutex_unlock(&event_lock);
-				goto out;
-			}
-		}
-	}
-	strcpy(event->pathname, filename);
-	event->direction = MIGRATE_OUT;
-	list_add(&event->next, &event_list);
-	pthread_mutex_unlock(&event_lock);
-
-	pthread_mutex_lock(&event->lock);
-	migrate_fd = open_backend(event->be, event->pathname);
-	if (migrate_fd < 0) {
-		err("failed to open backend file %s, error %d",
-		    event->pathname, errno);
-		event->error = errno;
-		goto out;
-	}
-	info("start migration on file '%s'", event->pathname);
-	ret = migrate_backend(event->be, migrate_fd, src_fd);
-	if (ret) {
-		err("failed to migrate file %s, error %d",
-		    event->pathname, ret);
-		event->error = ret;
-	} else {
-		info("finished migration on file '%s'", event->pathname);
-		event->error = 0;
-	}
-	close_backend(event->be, event->pathname, migrate_fd);
-	pthread_mutex_unlock(&event->lock);
-	pthread_mutex_lock(&event_lock);
-	list_del_init(&event->next);
-	pthread_mutex_unlock(&event_lock);
-	if (!event->error) {
-		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_ADD,
-				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
-				    AT_FDCWD, event->pathname);
-		if (ret < 0) {
-			err("failed to add fanotify mark "
-			    "to %s, error %d\n", event->pathname, errno);
-			unmigrate_file(event);
-			ret = -ret;
-		} else {
-			info("Added fanotify mark on '%s'", event->pathname);
-		}
-	}
-out:
-	free_migrate_event(event);
-	return ret;
 }
 
 void * unmigrate_file(void *arg)
 {
 	struct migrate_event *event = arg;
-	int migrate_fd, ret;
+	struct flock lock;
+	int src_fd, migrate_fd, ret;
 
-	pthread_mutex_lock(&event->lock);
 	if (event->thr != (pthread_t)0)
 		pthread_cleanup_push(cleanup_migrate_event, (void *)event);
+
+	info("Locking file '%s'", event->pathname);
+	src_fd = event->fa.fd;
+	lock.l_type = F_WRLCK;
+	lock.l_start = 0;
+	lock.l_whence = SEEK_SET;
+	lock.l_len = 0;
+	ret = fcntl(src_fd, F_SETLK, &lock);
+	if (ret) {
+		if (errno == EAGAIN ||
+		    errno == EACCES) {
+			/* Previous migration, wait for completion */
+		retry:
+			lock.l_type = F_WRLCK;
+			ret = fcntl(src_fd, F_SETLKW, &lock);
+			if (ret) {
+				if (errno == EINTR)
+					goto retry;
+				err("Wait for lock on source file '%s'"
+				    " failed, error %d",
+				    event->pathname, errno);
+				lock.l_type = F_UNLCK;
+			}
+		} else {
+			err("Cannot lock source file '%s', error %d",
+			    event->pathname, errno);
+			lock.l_type = F_UNLCK;
+		}
+	}
+	/* We could place the lock ok */
 	migrate_fd = open_backend(event->be, event->pathname);
 	if (!migrate_fd) {
-		err("failed to open backend file %s, error %d",
-		    event->pathname, errno);
-		event->error = errno;
-		goto out;
-	}
-	info("start un-migration on file '%s'", event->pathname);
-	ret = unmigrate_backend(event->be, event->fa.fd, migrate_fd);
-	if (ret < 0) {
-		err("failed to unmigrate file %s, error %d",
-			event->pathname, ret);
-		event->error = ret;
+		if (errno == ENOENT) {
+			info("backend file %s already un-migrated",
+			     event->pathname);
+			event->error = 0;
+		} else {
+			err("failed to open backend file %s, error %d",
+			    event->pathname, errno);
+			event->error = errno;
+			goto out;
+		}
 	} else {
-		info("finished un-migration on file '%s'", event->pathname);
-		event->error = 0;
+		info("start un-migration on file '%s'", event->pathname);
+		ret = unmigrate_backend(event->be, event->fa.fd, migrate_fd);
+		if (ret < 0) {
+			err("failed to unmigrate file %s, error %d",
+			    event->pathname, ret);
+			event->error = ret;
+		} else {
+			info("finished un-migration on file '%s'",
+			     event->pathname);
+			event->error = 0;
+		}
+		close_backend(event->be, event->pathname, migrate_fd);
 	}
-	close_backend(event->be, event->pathname, migrate_fd);
 	if (!event->error) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_REMOVE,
 				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
@@ -296,8 +214,7 @@ void * watch_fanotify(void * arg)
 	event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);
 
 	while (!daemon_stopped) {
-		struct migrate_event *tmp;
-		int rlen, ret, tmp_error;
+		int rlen, ret;
 
 		FD_ZERO(&rfd);
 		FD_SET(ctx->fanotify_fd, &rfd);
@@ -337,43 +254,9 @@ void * watch_fanotify(void * arg)
 		dbg("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d",
 		       i, (unsigned long) event->fa.mask, event->fa.fd,
 		       event->pathname, event->fa.pid);
-		tmp_error = ESTALE;
-		pthread_mutex_lock(&event_lock);
-		list_for_each_entry(tmp, &event_list, next) {
-			if (!strcmp(tmp->pathname, event->pathname)) {
-				/* Check for concurrent events */
-				dbg("concurrent event, dir %d error %d",
-				    tmp->direction, event->error);
-				pthread_mutex_lock(&tmp->lock);
-				if (tmp->direction == MIGRATE_OUT)
-					tmp_error = EAGAIN;
-				else
-					tmp_error = tmp->error;
-				pthread_mutex_unlock(&tmp->lock);
-				break;
-			}
-		}
-		if (!tmp_error) {
-			/* Previous migration done, continue */
-			pthread_mutex_unlock(&event_lock);
-			continue;
-		}
-		/*
-		 * Start unmigration when
-		 * - Previous unmigration failed
-		 * or
-		 * - Previous migration finished
-		 * or
-		 * - No previous migration attempted
-		 */
-		list_add(&event->next, &event_list);
-		pthread_mutex_unlock(&event_lock);
 		ret = pthread_create(&event->thr, NULL, unmigrate_file, event);
 		if (ret < 0) {
 			err("Failed to start thread, error %d", errno);
-			pthread_mutex_lock(&event_lock);
-			list_del_init(&event->next);
-			pthread_mutex_unlock(&event_lock);
 			free_migrate_event(event);
 		}
 		event = malloc_migrate_event(ctx->be, ctx->fanotify_fd);

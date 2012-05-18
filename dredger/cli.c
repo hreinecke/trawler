@@ -21,7 +21,7 @@
 #include "logging.h"
 #include "backend.h"
 #include "dredger.h"
-#include "watcher.h"
+#include "migrate.h"
 
 struct cli_monitor {
 	int running;
@@ -135,20 +135,6 @@ void *cli_monitor_thread(void *ctx)
 		info("CLI event '%s' file '%s'", event, filestr);
 
 		if (!strcmp(event, "Migrate")) {
-			ret = check_watcher(filestr);
-			if (ret) {
-				info("File '%s' busy, error %d", filestr, ret);
-				buf[0] = EBUSY;
-				iov.iov_len = 1;
-				goto send_msg;
-			}
-			ret = check_backend(cli->be, filestr);
-			if (!ret) {
-				info("File '%s' already migrated", filestr);
-				buf[0] = EEXIST;
-				iov.iov_len = 1;
-				goto send_msg;
-			}
 			ret = migrate_file(cli->be, cli->fanotify_fd, filestr);
 			if (ret) {
 				buf[0] = ret;
