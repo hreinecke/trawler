@@ -95,6 +95,13 @@ int open_backend_file(struct backend *be, char *fname)
 	return fd;
 }
 
+/*
+ * check_backend
+ *
+ * Checks if @fname is present in the backend
+ * Returns 0 if present and up-to-date,
+ * 1 if migration is required, and a negative number on error.
+ */
 int check_backend_file(struct backend *be, char *fname)
 {
 	struct backend_file_options *opts = be->options;
@@ -104,7 +111,7 @@ int check_backend_file(struct backend *be, char *fname)
 
 	if (stat(fname, &src_st) < 0) {
 		err("Source file '%s' not accessible, error %d", fname, errno);
-		return errno;
+		return -errno;
 	}
 	if (gmtime_r(&src_st.st_atime, &dtm)) {
 		info("Source file '%s', size %d, tstamp "
@@ -114,8 +121,13 @@ int check_backend_file(struct backend *be, char *fname)
 	}
 	strcpy(buf, opts->prefix);
 	strcat(buf, fname);
-	if (stat(buf, &backend_st) < 0)
-		return errno;
+	if (stat(buf, &backend_st) < 0) {
+		if (errno == ENOENT)
+			return 1;
+		info("Backend file '%s' not accesible, error %d",
+		     fname, errno);
+		return -errno;
+	}
 	if (gmtime_r(&backend_st.st_atime, &dtm)) {
 		info("Backend file '%s', size %d, tstamp "
 		     "%04d%02d%02d-%02d%02d%02d", buf, backend_st.st_size,
@@ -125,13 +137,14 @@ int check_backend_file(struct backend *be, char *fname)
 	if (backend_st.st_size != src_st.st_size) {
 		info("Backend file '%s' has different size than source file",
 		     fname);
-		return ESTALE;
+		return 1;
 	}
 	if (difftime(backend_st.st_atime, src_st.st_atime) < 0) {
 		info("Backend file '%s' older than source file",
 		     fname);
-		return ESTALE;
+		return 1;
 	}
+	/* Present, no migration required */
 	return 0;
 }
 

@@ -158,11 +158,18 @@ void *cli_monitor_thread(void *ctx)
 			}
 			break;
 		case CLI_CHECK:
-			if (check_backend(cli->be, filestr) < 0) {
-				info("File '%s' not watched", filestr);
+			ret = check_backend(cli->be, filestr);
+			if (ret < 0) {
+				err("File '%s' could not be checked, error %d",
+				    filestr, -ret);
+				buf[0] = -ret;
+				iov.iov_len = 1;
+			} else if (ret > 0) {
+				info("File '%s' needs migration", filestr);
 				buf[0] = ENODEV;
 				iov.iov_len = 1;
 			} else {
+				info("File '%s' up-to-date", filestr);
 				buf[0] = 0;
 				iov.iov_len = 0;
 			}
