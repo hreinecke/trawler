@@ -373,27 +373,10 @@ int cli_command(enum cli_commands cli_cmd, char *filename)
 		lock.l_len = 0;
 		ret = fcntl(src_fd, F_SETLK, &lock);
 		if (ret) {
-			if (errno == EAGAIN ||
-			    errno == EACCES) {
-				ret = fcntl(src_fd, F_GETLK, &lock);
-				if (ret) {
-					err("Could not get lock on "
-					    "source file '%s', error %d",
-					    filename, errno);
-				} else {
-					/* Wait for completion */
-					lock.l_type = F_WRLCK;
-					ret = fcntl(src_fd, F_SETLKW, &lock);
-					/* close() releases the lock */
-					close(src_fd);
-					return ret;
-				}
-			} else {
-				err("Cannot lock source file '%s', error %d",
-				    filename, errno);
-				close(src_fd);
-				return errno;
-			}
+			err("Cannot lock source file '%s', error %d",
+			    filename, errno);
+			close(src_fd);
+			return errno;
 		}
 	}
 	ret = cli_send_command(cli_cmd, filename, src_fd);

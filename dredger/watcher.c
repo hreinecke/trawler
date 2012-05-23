@@ -109,43 +109,10 @@ void cleanup_unmigrate_file(void *arg)
 void * unmigrate_file(void *arg)
 {
 	struct migrate_event *event = arg;
-	struct flock lock;
-	int src_fd, migrate_fd, ret;
+	int migrate_fd, ret;
 
 	if (event->thr != (pthread_t)0)
 		pthread_cleanup_push(cleanup_unmigrate_file, (void *)event);
-
-	info("Locking file '%s'", event->pathname);
-	src_fd = event->fa.fd;
-	lock.l_type = F_WRLCK;
-	lock.l_start = 0;
-	lock.l_whence = SEEK_SET;
-	lock.l_len = 0;
-	ret = fcntl(src_fd, F_SETLK, &lock);
-	if (ret) {
-		if (errno == EAGAIN ||
-		    errno == EACCES) {
-			/* Previous migration, wait for completion */
-			info("Lock contention on file '%s', wait for lock",
-			     event->pathname);
-		retry:
-			lock.l_type = F_WRLCK;
-			ret = fcntl(src_fd, F_SETLKW, &lock);
-			if (ret) {
-				if (errno == EINTR)
-					goto retry;
-				err("Wait for lock on source file '%s'"
-				    " failed, error %d",
-				    event->pathname, errno);
-				lock.l_type = F_UNLCK;
-			}
-		} else {
-			err("Cannot lock source file '%s', error %d",
-			    event->pathname, errno);
-			lock.l_type = F_UNLCK;
-		}
-	}
-	/* We could place the lock ok */
 	migrate_fd = open_backend(event->be, event->pathname);
 	if (!migrate_fd) {
 		if (errno == ENOENT) {
