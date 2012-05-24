@@ -114,7 +114,7 @@ int main(int argc, char **argv)
 
 	logfd = stdout;
 
-	while ((i = getopt(argc, argv, "b:c:d:m:o:s")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:m:o:p:s")) != -1) {
 		switch (i) {
 		case 'b':
 			be = select_backend(optarg);
@@ -125,14 +125,6 @@ int main(int argc, char **argv)
 			break;
 		case 'c':
 			return cli_command(CLI_CHECK, optarg);
-			break;
-		case 'd':
-			log_priority = strtoul(optarg, NULL, 10);
-			if (log_priority > LOG_DEBUG) {
-				err("Invalid logging priority %d (max %d)",
-				    log_priority, LOG_DEBUG);
-				exit(1);
-			}
 			break;
 		case 'm':
 			ret = cli_command(CLI_CHECK, optarg);
@@ -147,6 +139,14 @@ int main(int argc, char **argv)
 			if (be->parse_options(be, optarg) < 0) {
 				err("Invalid backend option '%s'", optarg);
 				return EINVAL;
+			}
+			break;
+		case 'p':
+			log_priority = strtoul(optarg, NULL, 10);
+			if (log_priority > LOG_DEBUG) {
+				err("Invalid logging priority %d (max %d)",
+				    log_priority, LOG_DEBUG);
+				exit(1);
 			}
 			break;
 		case 's':
