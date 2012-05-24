@@ -138,7 +138,10 @@ int main(int argc, char **argv)
 			ret = cli_command(CLI_CHECK, optarg);
 			if (ret)
 				return ret;
-			return cli_command(CLI_MIGRATE, optarg);
+			ret = cli_command(CLI_MIGRATE, optarg);
+			if (ret)
+				return ret;
+			return cli_command(CLI_MONITOR, optarg);
 			break;
 		case 'o':
 			if (be->parse_options(be, optarg) < 0) {

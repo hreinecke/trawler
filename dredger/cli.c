@@ -147,8 +147,7 @@ void *cli_monitor_thread(void *ctx)
 			iov.iov_len = 0;
 			break;
 		case CLI_MIGRATE:
-			ret = migrate_file(cli->be, cli->fanotify_fd,
-					   src_fd, filestr);
+			ret = migrate_file(cli->be, src_fd, filestr);
 			if (ret) {
 				buf[0] = ret;
 				iov.iov_len = 1;
@@ -174,6 +173,16 @@ void *cli_monitor_thread(void *ctx)
 				iov.iov_len = 1;
 			}
 			break;
+		case CLI_MONITOR:
+			ret = monitor_file(cli->fanotify_fd, filestr);
+			if (ret) {
+				buf[0] = ret;
+				iov.iov_len = 1;
+			} else {
+				buf[0] = 0;
+				iov.iov_len = 0;
+			}
+			break;
 		default:
 			info("%s: Unhandled event %d",filestr, cli_cmd);
 			buf[0] = EINVAL;
@@ -183,6 +192,8 @@ void *cli_monitor_thread(void *ctx)
 
 		if (sendmsg(cli->sock, &smsg, 0) < 0)
 			err("sendmsg failed, error %d", errno);
+		if (src_fd >= 0)
+			close(src_fd);
 	}
 	pthread_cleanup_pop(1);
 	return ((void *)0);

@@ -16,8 +16,7 @@
 
 #define LOG_AREA "migrate"
 
-int migrate_file(struct backend *be, int fanotify_fd, int src_fd,
-		 char *filename)
+int migrate_file(struct backend *be, int src_fd, char *filename)
 {
 	int migrate_fd;
 	int ret;
@@ -40,15 +39,22 @@ int migrate_file(struct backend *be, int fanotify_fd, int src_fd,
 		    filename, ret);
 	} else {
 		info("finished migration on file '%s'", filename);
-		info("Set fanotify_mark on '%s'", filename);
-		ret = fanotify_mark(fanotify_fd, FAN_MARK_ADD,
-				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
-				    AT_FDCWD, filename);
-		if (ret < 0) {
-			err("failed to add fanotify mark "
-			    "to %s, error %d\n", filename, errno);
-			ret = -ret;
-		}
+	}
+	return ret;
+}
+
+int monitor_file(int fanotify_fd, char *filename)
+{
+	int ret;
+
+	info("Set fanotify_mark on '%s'", filename);
+	ret = fanotify_mark(fanotify_fd, FAN_MARK_ADD,
+			    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
+			    AT_FDCWD, filename);
+	if (ret < 0) {
+		err("failed to add fanotify mark "
+		    "to %s, error %d\n", filename, errno);
+		ret = -ret;
 	}
 	return ret;
 }

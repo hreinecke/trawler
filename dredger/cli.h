@@ -8,6 +8,7 @@ enum cli_commands {
     CLI_SHUTDOWN,
     CLI_MIGRATE,
     CLI_CHECK,
+    CLI_MONITOR,
     CLI_NOFILE,
 };
 
