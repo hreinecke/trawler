@@ -229,6 +229,52 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	return 0;
 }
 
+int setup_backend_file(struct backend *be, int be_fd, char *filename)
+{
+	int orig_fd;
+	struct stat be_st;
+	struct timeval tv[2];
+
+	orig_fd = open(filename, O_RDWR|O_CREAT, S_IRWXU);
+	if (orig_fd < 0) {
+		err("Cannot open source fd, error %d", errno);
+		return errno;
+	}
+	if (fstat(be_fd, &be_st) < 0) {
+		err("Cannot stat backend fd, error %d", errno);
+		return errno;
+	}
+	if (fchmod(orig_fd, be_st.st_mode) < 0) {
+		err("cannot set file permissions, error %d", errno);
+	}
+	if (fchown(orig_fd, be_st.st_uid, be_st.st_gid) < 0) {
+		err("cannot update file owner, error %d", errno);
+	}
+	if (ftruncate(orig_fd, 0) < 0) {
+		err("ftruncate failed, error %d", errno);
+		return errno;
+	}
+	/*
+	 * Any error from here can be ignored, as we have
+	 * successfull migrated the file.
+	 */
+	if (lseek(orig_fd, be_st.st_size - 1, SEEK_SET) < 0) {
+		err("Cannot seek to end of sparse file, error %d", errno);
+		return 0;
+	}
+	if (write(orig_fd, "\0", 1) < 1)
+		err("Cannot create sparse file, error %d", errno);
+	tv[0].tv_sec = difftime(be_st.st_atime, 0);
+	tv[0].tv_usec = 0;
+	tv[1].tv_sec = difftime(be_st.st_mtime, 0);
+	tv[1].tv_usec = 0;
+	if (futimes(orig_fd, tv) < 0) {
+		err("cannot update backend file timestamps, error %d", errno);
+	}
+	close(orig_fd);
+	return 0;
+}
+
 int unmigrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 {
 	struct stat orig_st, be_st;
@@ -285,6 +331,7 @@ struct backend backend_file = {
 	.init = init_backend_file,
 	.open = open_backend_file,
 	.check = check_backend_file,
+	.setup = setup_backend_file,
 	.migrate = migrate_backend_file,
 	.unmigrate = unmigrate_backend_file,
 	.close = close_backend_file,

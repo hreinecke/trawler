@@ -9,6 +9,7 @@ enum cli_commands {
     CLI_MIGRATE,
     CLI_CHECK,
     CLI_MONITOR,
+    CLI_SETUP,
     CLI_NOFILE,
 };
 

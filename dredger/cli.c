@@ -137,57 +137,47 @@ void *cli_monitor_thread(void *ctx)
 
 		switch (cli_cmd) {
 		case CLI_NOFILE:
-			buf[0] = EINVAL;
-			iov.iov_len = 1;
+			ret = EINVAL;
 			break;
 		case CLI_SHUTDOWN:
 			pthread_kill(daemon_thr, SIGTERM);
 			cli->running = 0;
-			buf[0] = 0;
-			iov.iov_len = 0;
+			ret = 0;
 			break;
 		case CLI_MIGRATE:
 			ret = migrate_file(cli->be, src_fd, filestr);
-			if (ret) {
-				buf[0] = ret;
-				iov.iov_len = 1;
-			} else {
-				buf[0] = 0;
-				iov.iov_len = 0;
-			}
 			break;
 		case CLI_CHECK:
 			ret = check_backend(cli->be, filestr);
 			if (ret < 0) {
 				err("File '%s' could not be checked, error %d",
 				    filestr, -ret);
-				buf[0] = -ret;
-				iov.iov_len = 1;
+				ret = -ret;
 			} else if (ret > 0) {
 				info("File '%s' needs migration", filestr);
-				buf[0] = 0;
-				iov.iov_len = 0;
+				ret = 0;
 			} else {
 				info("File '%s' up-to-date", filestr);
-				buf[0] = EALREADY;
-				iov.iov_len = 1;
+				ret = EALREADY;
 			}
 			break;
 		case CLI_MONITOR:
 			ret = monitor_file(cli->fanotify_fd, filestr);
-			if (ret) {
-				buf[0] = ret;
-				iov.iov_len = 1;
-			} else {
-				buf[0] = 0;
-				iov.iov_len = 0;
-			}
+			break;
+		case CLI_SETUP:
+			ret = setup_file(cli->be, filestr);
 			break;
 		default:
 			info("%s: Unhandled event %d",filestr, cli_cmd);
-			buf[0] = EINVAL;
-			iov.iov_len = 1;
+			ret = EINVAL;
 			break;
+		}
+		if (ret) {
+			buf[0] = ret;
+			iov.iov_len = 1;
+		} else {
+			buf[0] = 0;
+			iov.iov_len = 0;
 		}
 
 		if (sendmsg(cli->sock, &smsg, 0) < 0)

@@ -119,7 +119,7 @@ int main(int argc, char **argv)
 
 	logfd = stdout;
 
-	while ((i = getopt(argc, argv, "b:c:d:m:o:p:s")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:d:m:o:p:su:")) != -1) {
 		switch (i) {
 		case 'b':
 			be = select_backend(optarg);
@@ -167,6 +167,15 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			return cli_command(CLI_SHUTDOWN, NULL);
+			break;
+		case 'u':
+			ret = cli_command(CLI_CHECK, optarg);
+			if (ret && ret != ENOENT)
+				return ret;
+			ret = cli_command(CLI_SETUP, optarg);
+			if (ret)
+				return ret;
+			return cli_command(CLI_MONITOR, optarg);
 			break;
 		default:
 			fprintf(stderr, "usage: %s [-d <dir>]\n", argv[0]);
