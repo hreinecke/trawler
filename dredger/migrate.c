@@ -4,6 +4,7 @@
  * Migrate files to backend.
  * Copyright (c) 2012 Hannes Reinecke <hare@suse.de>
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>

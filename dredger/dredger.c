@@ -97,24 +97,29 @@ void log_fn(int priority, const char *format, ...)
 
 struct backend *select_backend(const char *name) {
 	int i = 0;
+	struct backend *be = NULL;
 
 	while (backend_list[i]) {
-		if (!strcmp(backend_list[i]->name, name))
-			return backend_list[i];
+		if (!strcmp(backend_list[i]->name, name)) {
+			be = backend_list[i];
+			break;
+		}
 		i++;
 	}
-	return NULL;
+	if (be)
+		init_backend(be);
+	return be;
 }
 
 int main(int argc, char **argv)
 {
 	int i;
 	int fanotify_fd, ret;
-	struct backend *be;
+	struct backend *be = NULL;
 
 	logfd = stdout;
 
-	while ((i = getopt(argc, argv, "b:c:m:o:p:s")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:d:m:o:p:s")) != -1) {
 		switch (i) {
 		case 'b':
 			be = select_backend(optarg);
@@ -122,6 +127,13 @@ int main(int argc, char **argv)
 				err("Invalid backend '%s'\n", optarg);
 				return EINVAL;
 			}
+			break;
+		case 'd':
+			if (!be) {
+				err("No backend selected");
+				return EINVAL;
+			}
+			strcpy(be->topdir, optarg);
 			break;
 		case 'c':
 			return cli_command(CLI_CHECK, optarg);
@@ -136,6 +148,10 @@ int main(int argc, char **argv)
 			return cli_command(CLI_MONITOR, optarg);
 			break;
 		case 'o':
+			if (!be) {
+				err("No backend selected");
+				return EINVAL;
+			}
 			if (be->parse_options(be, optarg) < 0) {
 				err("Invalid backend option '%s'", optarg);
 				return EINVAL;

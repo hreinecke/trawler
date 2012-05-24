@@ -77,13 +77,28 @@ int parse_backend_options(struct backend *be, char *optionstr)
 	return 0;
 }
 
+void init_backend_file(struct backend *be)
+{
+	strcpy(be->topdir, "/");
+}
+
 int open_backend_file(struct backend *be, char *fname)
 {
 	struct backend_file_options *opts = be->options;
 	int fd = -1;
 	char buf[FILENAME_MAX];
 
+	memset(buf, 0, FILENAME_MAX);
 	strcpy(buf, opts->prefix);
+	if (strcmp(be->topdir, "/")) {
+		if (strncmp(be->topdir, fname, strlen(be->topdir))) {
+			err("Source file '%s' outside monitored directory",
+			    fname);
+			errno = EINVAL;
+			return -1;
+		}
+		fname += strlen(be->topdir);
+	}
 	strcat(buf, fname);
 	if (create_leading_directories(buf, S_IRWXU) < 0)
 		return -1;
@@ -120,6 +135,14 @@ int check_backend_file(struct backend *be, char *fname)
 		     dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
 	}
 	strcpy(buf, opts->prefix);
+	if (strcmp(be->topdir, "/")) {
+		if (strncmp(be->topdir, fname, strlen(be->topdir))) {
+			err("Source file '%s' outside monitored directory",
+			    fname);
+			return -EINVAL;
+		}
+		fname += strlen(be->topdir);
+	}
 	strcat(buf, fname);
 	if (stat(buf, &backend_st) < 0) {
 		if (errno == ENOENT)
@@ -259,6 +282,7 @@ void close_backend_file(struct backend *be, char *fname, int fd)
 struct backend backend_file = {
 	.name = "file",
 	.parse_options = parse_backend_options,
+	.init = init_backend_file,
 	.open = open_backend_file,
 	.check = check_backend_file,
 	.migrate = migrate_backend_file,

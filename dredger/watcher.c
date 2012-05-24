@@ -52,7 +52,10 @@ int get_fname(int fd, char *fname)
 	len = readlink(buf, fname, FILENAME_MAX-1);
 	if (len <= 0) {
 		fname[0] = '\0';
+	} else {
+		fname[len] = '\0';
 	}
+	info("read filename '%s' len '%d'", fname, len);
 	return len;
 }
 
