@@ -198,7 +198,10 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	tv[1].tv_sec = difftime(orig_st.st_mtime, 0);
 	tv[1].tv_usec = 0;
 	if (futimes(be_fd, tv) < 0) {
-		err("cannot update file timestamps, error %d", errno);
+		err("cannot update backend file timestamps, error %d", errno);
+	}
+	if (futimes(orig_fd, tv) < 0) {
+		err("cannot update source file timestamps, error %d", errno);
 	}
 	return 0;
 }
