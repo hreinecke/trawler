@@ -71,7 +71,7 @@ struct migrate_event *malloc_migrate_event(struct backend *be, int fd)
 	return event;
 }
 
-void free_migrate_event(struct migrate_event *event)
+void cleanup_migrate_event(struct migrate_event *event)
 {
 	if (event->fa.mask & FAN_ACCESS_PERM) {
 		struct fanotify_response resp;
@@ -94,15 +94,16 @@ void free_migrate_event(struct migrate_event *event)
 		close(event->fa.fd);
 		event->fa.fd = -1;
 	}
-	free(event);
+	memset(event->pathname, 0, sizeof(event->pathname));
 }
 
-void cleanup_migrate_event(void *arg)
+void cleanup_unmigrate_file(void *arg)
 {
 	struct migrate_event *event = arg;
 
 	event->thr = (pthread_t)0;
-	free_migrate_event(event);
+	cleanup_migrate_event(event);
+	free(event);
 }
 
 void * unmigrate_file(void *arg)
@@ -112,7 +113,7 @@ void * unmigrate_file(void *arg)
 	int src_fd, migrate_fd, ret;
 
 	if (event->thr != (pthread_t)0)
-		pthread_cleanup_push(cleanup_migrate_event, (void *)event);
+		pthread_cleanup_push(cleanup_unmigrate_file, (void *)event);
 
 	info("Locking file '%s'", event->pathname);
 	src_fd = event->fa.fd;
@@ -189,8 +190,11 @@ void cleanup_context(void * arg)
 {
 	struct watcher_context *ctx = arg;
 
-	if (ctx->event)
-		free_migrate_event(ctx->event);
+	if (ctx->event) {
+		cleanup_migrate_event(ctx->event);
+		free(ctx->event);
+		ctx->event = NULL;
+	}
 	free(ctx);
 }
 
@@ -251,26 +255,7 @@ void * watch_fanotify(void * arg)
 				     event);
 		if (ret < 0) {
 			err("Failed to start thread, error %d", errno);
-			if (event->fa.mask & FAN_ACCESS_PERM) {
-				struct fanotify_response resp;
-
-				resp.fd = event->fa.fd;
-				resp.response = FAN_DENY;
-				if (write(event->fanotify_fd, &resp,
-					  sizeof(resp)) < 0) {
-					err("watcher: Failed to write "
-					    "fanotify response: error %d",
-					    errno);
-				} else {
-					dbg("watcher: Wrote response '%s'",
-					    (resp.response == FAN_ALLOW) ?
-					    "FAN_ALLOW" : "FAN_DENY");
-				}
-			}
-			if (event->fa.fd >= 0) {
-				close(event->fa.fd);
-				event->fa.fd = -1;
-			}
+			cleanup_migrate_event(event);
 			ctx->event = event;
 		} else
 			ctx->event = malloc_migrate_event(ctx->be,
