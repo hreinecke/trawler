@@ -98,6 +98,7 @@ void cleanup_migrate_event(struct migrate_event *event)
 		event->fa.fd = -1;
 	}
 	memset(event->pathname, 0, sizeof(event->pathname));
+	event->error = 0;
 }
 
 void cleanup_unmigrate_file(void *arg)
@@ -213,13 +214,22 @@ void * watch_fanotify(void * arg)
 		}
 
 		if (get_fname(event->fa.fd, event->pathname) < 0) {
-			err("cannot retrieve filename");
+			err("cannot retrieve filename, allow access");
+			cleanup_migrate_event(event);
+			ctx->event = event;
 			continue;
 		}
 
 		dbg("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d",
 		    i, (unsigned long) event->fa.mask, event->fa.fd,
 		    event->pathname, event->fa.pid);
+		if (event->fd.pid == getpid()) {
+			/* Avoid deadlocking */
+			info("Identical PID, allowing access");
+			cleanup_migrate_event(event);
+			ctx->event = event;
+			continue;
+		}
 		ctx->event = NULL;
 		ret = pthread_create(&event->thr, NULL, unmigrate_file,
 				     event);
