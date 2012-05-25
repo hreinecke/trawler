@@ -17,34 +17,6 @@
 
 #define LOG_AREA "migrate"
 
-int setup_file(struct backend *be, char *filename)
-{
-	int migrate_fd;
-	int ret;
-
-	migrate_fd = open_backend(be, filename);
-	if (migrate_fd < 0) {
-		if (errno == EEXIST) {
-			info("file '%s' already migrated", filename);
-		} else {
-			err("failed to open backend file %s, error %d",
-			    filename, errno);
-		}
-		return errno;
-	}
-	info("start setup file '%s'", filename);
-	ret = setup_backend(be, migrate_fd, filename);
-	close_backend(be, filename, migrate_fd);
-	if (ret) {
-		err("failed to setup file %s, error %d",
-		    filename, ret);
-	} else {
-		info("finished setup on file '%s'", filename);
-	}
-	return ret;
-}
-
-
 int migrate_file(struct backend *be, int src_fd, char *filename)
 {
 	int migrate_fd;
@@ -60,8 +32,13 @@ int migrate_file(struct backend *be, int src_fd, char *filename)
 		}
 		return errno;
 	}
-	info("start migration on file '%s'", filename);
-	ret = migrate_backend(be, migrate_fd, src_fd);
+	if (src_fd < 0) {
+		info("start setup file '%s'", filename);
+		ret = setup_backend(be, migrate_fd, filename);
+	} else {
+		info("start migration on file '%s'", filename);
+		ret = migrate_backend(be, migrate_fd, src_fd);
+	}
 	close_backend(be, filename, migrate_fd);
 	if (ret) {
 		err("failed to migrate file %s, error %d",

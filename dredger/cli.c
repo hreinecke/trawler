@@ -165,7 +165,7 @@ void *cli_monitor_thread(void *ctx)
 			ret = monitor_file(cli->fanotify_fd, filestr);
 			break;
 		case CLI_SETUP:
-			ret = setup_file(cli->be, filestr);
+			ret = migrate_file(cli->be, -1, filestr);
 			break;
 		default:
 			info("%s: Unhandled event %d",filestr, cli_cmd);
