@@ -175,6 +175,7 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 {
 	struct stat orig_st, be_st;
 	struct timeval tv[2];
+	ssize_t bytes;
 
 	if (fstat(be_fd, &be_st) < 0) {
 		err("Cannot stat backend fd, error %d", errno);
@@ -192,9 +193,14 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 			return errno;
 		}
 	}
-	if (sendfile(be_fd, orig_fd, 0, orig_st.st_size) < 0) {
+	bytes = sendfile(be_fd, orig_fd, 0, orig_st.st_size);
+	if ( bytes < 0) {
 		err("sendfile failed, error %d", errno);
 		return errno;
+	} else if (bytes < orig_st.st_size) {
+		err("sendfile copied only %ld of %ld bytes",
+		    bytes, orig_st.st_size);
+		return EFBIG;
 	}
 	if (fchmod(be_fd, orig_st.st_mode) < 0) {
 		err("cannot set file permissions, error %d", errno);
@@ -210,12 +216,12 @@ int migrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 	 * Any error from here can be ignored, as we have
 	 * successfull migrated the file.
 	 */
-	if (lseek(orig_fd, orig_st.st_size - 1, SEEK_SET) < 0) {
+	if (lseek(orig_fd, orig_st.st_size - 1, SEEK_SET) == 0) {
+		if (write(orig_fd, "\0", 1) < 1)
+			err("Cannot create sparse file, error %d", errno);
+	} else {
 		err("Cannot seek to end of sparse file, error %d", errno);
-		return 0;
 	}
-	if (write(orig_fd, "\0", 1) < 1)
-		err("Cannot create sparse file, error %d", errno);
 	tv[0].tv_sec = difftime(orig_st.st_atime, 0);
 	tv[0].tv_usec = 0;
 	tv[1].tv_sec = difftime(orig_st.st_mtime, 0);
@@ -279,6 +285,7 @@ int unmigrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 {
 	struct stat orig_st, be_st;
 	struct timeval tv[2];
+	ssize_t bytes;
 
 	if (fstat(be_fd, &be_st) < 0) {
 		err("Cannot stat backend fd, error %d", errno);
@@ -296,9 +303,14 @@ int unmigrate_backend_file(struct backend *be, int be_fd, int orig_fd)
 			return errno;
 		}
 	}
-	if (sendfile(be_fd, orig_fd, 0, be_st.st_size) < 0) {
+	bytes = sendfile(be_fd, orig_fd, 0, be_st.st_size);
+	if (bytes < 0) {
 		err("sendfile failed, error %d", errno);
 		return errno;
+	} else if (bytes < be_st.st_size) {
+		err("sendfile copied only %ld of %ld bytes",
+		    bytes, be_st.st_size);
+		return EFBIG;
 	}
 	tv[0].tv_sec = difftime(be_st.st_atime, 0);
 	tv[0].tv_usec = 0;
