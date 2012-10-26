@@ -6,7 +6,7 @@ PRG = dredger
 SRCS = dredger.c watcher.c cli.c migrate.c backend.c backend-file.c
 OBJS = dredger.o watcher.o cli.o migrate.o backend.o backend-file.o
 
-CFLAGS = -Wall -g -D_GNU_SOURCE
+CFLAGS = -Wall -g -D_GNU_SOURCE -I../include
 
 all: $(PRG)
 
