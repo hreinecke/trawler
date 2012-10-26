@@ -24,5 +24,5 @@ $(PRG): $(OBJS)
 
 watcher.c: watcher.h
 trawler.c: watcher.h events.h
-events.c: list.h events.h
+events.c: events.h
 
