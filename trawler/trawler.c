@@ -21,9 +21,16 @@
 #include "list.h"
 #include "watcher.h"
 #include "events.h"
+#include "logging.h"
+
+#define LOG_AREA "trawler"
 
 pthread_cond_t exit_cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t exit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int log_priority = LOG_ERR;
+int use_syslog;
+FILE *logfd;
 
 static void *
 signal_set(int signo, void (*func) (int))

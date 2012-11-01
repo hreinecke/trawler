@@ -18,6 +18,10 @@
 #include <search.h>
 #include <pthread.h>
 
+#include "logging.h"
+
+#define LOG_AREA "watcher"
+
 struct event_watch {
 	int ew_wd;
 	char ew_path[PATH_MAX];
@@ -52,8 +56,8 @@ void free_watch(void *p)
 	struct event_watch *ew = p;
 
 	inotify_rm_watch(inotify_fd, ew->ew_wd);
-	printf("%s: removed inotify watch %d\n",
-	       ew->ew_path, ew->ew_wd);
+	info("%s: removed inotify watch %d\n",
+	     ew->ew_path, ew->ew_wd);
 	free(ew);
 }
 
@@ -64,13 +68,12 @@ int insert_inotify(char *dirname, int locked)
 
 	ew = malloc(sizeof(struct event_watch));
 	if (!ew) {
-		fprintf(stderr, "%s: cannot allocate watch entry\n", dirname);
+		err("%s: cannot allocate watch entry", dirname);
 		return -ENOMEM;
 	}
 	ew->ew_wd = inotify_add_watch(inotify_fd, dirname, IN_ALL_EVENTS);
 	if (ew->ew_wd < 0) {
-		fprintf(stderr, "%s: inotify_add_watch failed with %d\n",
-			dirname, errno);
+		err("%s: inotify_add_watch failed with %d", dirname, errno);
 		free(ew);
 		return -errno;
 	}
@@ -81,17 +84,16 @@ int insert_inotify(char *dirname, int locked)
 	if (!locked)
 		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
-		fprintf(stderr, "%s: Failed to insert watch entry\n", dirname);
+		err("%s: Failed to insert watch entry", dirname);
 		inotify_rm_watch(inotify_fd, ew->ew_wd);
 		free(ew);
 		return -ENOMEM;
 	} else if ((*(struct event_watch **) val) != ew) {
-		fprintf(stderr, "%s: watch %d already present\n", dirname,
-			ew->ew_wd);
+		err("%s: watch %d already present", dirname, ew->ew_wd);
 		free(ew);
 		return -EEXIST;
 	}
-	printf("%s: added inotify watch %d %p\n", ew->ew_path, ew->ew_wd, ew);
+	info("%s: added inotify watch %d %p", ew->ew_path, ew->ew_wd, ew);
 	return 0;
 }
 
@@ -107,7 +109,7 @@ int remove_inotify(char *dirname, int locked)
 	if (!locked)
 		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
-		fprintf(stderr, "%s: watch entry not found in tree", dirname);
+		err("%s: watch entry not found in tree", dirname);
 		return -EINVAL;
 	}
 	found_ew = *(struct event_watch **)val;
@@ -117,12 +119,11 @@ int remove_inotify(char *dirname, int locked)
 	if (!locked)
 		pthread_mutex_unlock(&tree_mutex);
 	if (!val) {
-		fprintf(stderr, "%s: failed to remove in watch entry",
-			dirname);
+		err("%s: failed to remove in watch entry", dirname);
 		return -EINVAL;
 	}
 	inotify_rm_watch(inotify_fd, found_ew->ew_wd);
-	printf("%s: removed inotify watch %d\n",
+	info("%s: removed inotify watch %d",
 	       found_ew->ew_path, found_ew->ew_wd);
 	free(found_ew);
 
@@ -155,15 +156,15 @@ void * watch_dir(void * arg)
 		if (ret < 0) {
 			if (ret == EINTR)
 				continue;
-			fprintf(stderr,"select returned %d\n", errno);
+			err("select returned %d\n", errno);
 			break;
 		}
 		if (ret == 0) {
-			fprintf(stderr, "select timeout\n");
+			err( "select timeout\n");
 			continue;
 		}
 		if (!FD_ISSET(inotify_fd, &rfd)) {
-			fprintf(stderr, "select returned for invalid fd\n");
+			err( "select returned for invalid fd\n");
 			continue;
 		}
 
@@ -188,7 +189,7 @@ void * watch_dir(void * arg)
 					 compare_wd);
 			pthread_cleanup_pop(1);
 			if (!val) {
-				fprintf(stderr, "inotify event %d not found "
+				err( "inotify event %d not found "
 					"in tree", in_ev->wd);
 				goto next;
 			}
@@ -199,13 +200,13 @@ void * watch_dir(void * arg)
 				type = "file";
 			}
 			if (in_ev->mask & IN_IGNORED) {
-				printf("inotify event %d removed\n",
-				       in_ev->wd);
+				info("inotify event %d removed",
+				     in_ev->wd);
 				goto next;
 			}
 			if (in_ev->mask & IN_Q_OVERFLOW) {
-				printf("inotify event %d: queue overflow\n",
-				       in_ev->wd);
+				info("inotify event %d: queue overflow",
+				     in_ev->wd);
 				goto next;
 			}
 			printf("event %d: %x\n",
@@ -253,17 +254,15 @@ int start_watcher(void)
 
 	inotify_fd = inotify_init();
 	if (inotify_fd < 0) {
-		fprintf(stderr, "Failed to initialize inotify, error %d\n",
-			errno);
+		err("Failed to initialize inotify, error %d", errno);
 		return errno;
 	}
 
 	retval = pthread_create(&watcher_thr, NULL, watch_dir, &inotify_fd);
 	if (retval) {
-		fprintf(stderr, "Failed to create watcher thread: %d\n",
-			retval);
+		err("Failed to create watcher thread: %d", retval);
 	}
-	printf("Starting inotify watcher\n");
+	info("Starting inotify watcher\n");
 	return retval;
 }
 
@@ -272,7 +271,7 @@ int stop_watcher(void)
 	stopped = 1;
 	pthread_cancel(watcher_thr);
 	pthread_join(watcher_thr, NULL);
-	printf("Stopped inotify watcher\n");
+	info("Stopped inotify watcher");
 	pthread_mutex_lock(&tree_mutex);
 	tdestroy(watch_tree, free_watch);
 	pthread_mutex_unlock(&tree_mutex);

@@ -1,6 +1,7 @@
 #ifndef _LOGGING_H
 #define _LOGGING_H
 
+#include <stdio.h>
 #include <syslog.h>
 
 void log_fn(int priority, const char *format, ...);
@@ -9,5 +10,9 @@ void log_fn(int priority, const char *format, ...);
 #define info(fmt, args...) log_fn(LOG_INFO, LOG_AREA ": " fmt "\n", ##args)
 #define warn(fmt, args...) log_fn(LOG_WARNING, LOG_AREA ": " fmt "\n", ##args)
 #define err(fmt, args...) log_fn(LOG_ERR, LOG_AREA ": " fmt "\n", ##args)
+
+extern int log_priority;
+extern int use_syslog;
+extern FILE *logfd;
 
 #endif /* _LOGGING_H */
