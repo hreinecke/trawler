@@ -38,10 +38,7 @@ int log_priority = LOG_ERR;
 int use_syslog;
 FILE *logfd;
 
-struct backend *backend_list[] = {
-	&backend_file,
-	NULL
-};
+char frontend_prefix[FILENAME_MAX];
 
 static void *
 signal_set(int signo, void (*func) (int))
@@ -95,45 +92,33 @@ void log_fn(int priority, const char *format, ...)
 	va_end(ap);
 }
 
-struct backend *select_backend(const char *name) {
-	int i = 0;
-	struct backend *be = NULL;
-
-	while (backend_list[i]) {
-		if (!strcmp(backend_list[i]->name, name)) {
-			be = backend_list[i];
-			break;
-		}
-		i++;
-	}
-	if (be)
-		init_backend(be);
-	return be;
-}
-
 int main(int argc, char **argv)
 {
 	int i;
 	int fanotify_fd, ret;
 	struct backend *be = NULL;
+	struct stat stbuf;
 
 	logfd = stdout;
+	memset(frontend_prefix, 0x0, FILENAME_MAX);
 
 	while ((i = getopt(argc, argv, "b:c:d:m:o:p:su:")) != -1) {
 		switch (i) {
 		case 'b':
-			be = select_backend(optarg);
+			be = new_backend(optarg);
 			if (!be) {
 				err("Invalid backend '%s'\n", optarg);
 				return EINVAL;
 			}
 			break;
 		case 'd':
-			if (!be) {
-				err("No backend selected");
+			if (stat(optarg, &stbuf) < 0 ||
+			    !S_ISDIR(stbuf.st_mode)) {
+				err("Frontend prefix %s is not a directory",
+				    optarg);
 				return EINVAL;
 			}
-			strcpy(be->topdir, optarg);
+			strncpy(frontend_prefix, optarg, FILENAME_MAX);
 			break;
 		case 'c':
 			return cli_command(CLI_CHECK, optarg);
@@ -152,7 +137,7 @@ int main(int argc, char **argv)
 				err("No backend selected");
 				return EINVAL;
 			}
-			if (be->parse_options(be, optarg) < 0) {
+			if (parse_backend_options(be, optarg) < 0) {
 				err("Invalid backend option '%s'", optarg);
 				return EINVAL;
 			}

@@ -43,7 +43,7 @@ struct watcher_context {
 	struct migrate_event *event;
 };
 
-int get_fname(int fd, char *fname)
+static int get_fname(int fd, char *fname)
 {
 	int len;
 	char buf[FILENAME_MAX];
@@ -113,13 +113,13 @@ void cleanup_unmigrate_file(void *arg)
 void * unmigrate_file(void *arg)
 {
 	struct migrate_event *event = arg;
-	int migrate_fd, ret;
+	int ret;
 
 	if (event->thr != (pthread_t)0)
 		pthread_cleanup_push(cleanup_unmigrate_file, (void *)event);
-	migrate_fd = open_backend(event->be, event->pathname);
-	if (!migrate_fd) {
-		if (errno == ENOENT) {
+	ret = open_backend(event->be, event->pathname);
+	if (ret) {
+		if (ret == ENOENT) {
 			info("backend file %s already un-migrated",
 			     event->pathname);
 			event->error = 0;
@@ -131,7 +131,7 @@ void * unmigrate_file(void *arg)
 		}
 	} else {
 		info("start un-migration on file '%s'", event->pathname);
-		ret = unmigrate_backend(event->be, event->fa.fd, migrate_fd);
+		ret = unmigrate_backend(event->be, event->fa.fd);
 		if (ret < 0) {
 			err("failed to unmigrate file %s, error %d",
 			    event->pathname, ret);
@@ -141,7 +141,7 @@ void * unmigrate_file(void *arg)
 			     event->pathname);
 			event->error = 0;
 		}
-		close_backend(event->be, event->pathname, migrate_fd);
+		close_backend(event->be);
 	}
 	if (!event->error) {
 		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_REMOVE,
@@ -223,7 +223,7 @@ void * watch_fanotify(void * arg)
 		dbg("fanotify event %d: mask 0x%02lX, fd %d (%s), pid %d",
 		    i, (unsigned long) event->fa.mask, event->fa.fd,
 		    event->pathname, event->fa.pid);
-		if (event->fd.pid == getpid()) {
+		if (event->fa.pid == getpid()) {
 			/* Avoid deadlocking */
 			info("Identical PID, allowing access");
 			cleanup_migrate_event(event);
