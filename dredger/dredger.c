@@ -102,7 +102,7 @@ int main(int argc, char **argv)
 	logfd = stdout;
 	memset(frontend_prefix, 0x0, FILENAME_MAX);
 
-	while ((i = getopt(argc, argv, "b:c:d:m:o:p:su:")) != -1) {
+	while ((i = getopt(argc, argv, "b:c:d:m:n:o:p:su:")) != -1) {
 		switch (i) {
 		case 'b':
 			be = new_backend(optarg);
@@ -130,6 +130,8 @@ int main(int argc, char **argv)
 			ret = cli_command(CLI_MIGRATE, optarg);
 			if (ret)
 				return ret;
+			/* Fallthrough */
+		case 'n':
 			return cli_command(CLI_MONITOR, optarg);
 			break;
 		case 'o':
