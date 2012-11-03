@@ -1,8 +1,10 @@
 #
 #
 #
+lib/lib.a
 dredger/dredger
 trawler/trawler
+trawler/mksparse
 *.o
 *~
 
