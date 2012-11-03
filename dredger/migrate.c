@@ -49,6 +49,35 @@ int migrate_file(struct backend *be, int fe_fd, char *filename)
 	return ret;
 }
 
+int unmigrate_file(struct backend *be, int fe_fd, char *filename)
+{
+	int ret;
+
+	ret = open_backend(be, filename);
+	if (ret) {
+		if (ret == ENOENT) {
+			info("backend file %s already un-migrated",
+			     filename);
+			ret = 0;
+		} else {
+			err("failed to open backend file %s, error %d",
+			    filename, ret);
+		}
+		return ret;
+	}
+	info("start un-migration on file '%s'", filename);
+	ret = unmigrate_backend(be, fe_fd);
+	if (ret < 0) {
+		err("failed to unmigrate file %s, error %d",
+		    filename, ret);
+	} else {
+		info("finished un-migration on file '%s'", filename);
+	}
+	close_backend(be);
+
+	return ret;
+}
+
 int monitor_file(int fanotify_fd, char *filename)
 {
 	int ret;
@@ -61,6 +90,20 @@ int monitor_file(int fanotify_fd, char *filename)
 		err("failed to add fanotify mark "
 		    "to %s, error %d\n", filename, errno);
 		ret = -ret;
+	}
+	return ret;
+}
+
+int unmonitor_file(int fanotify_fd, char *filename)
+{
+	int ret;
+
+	ret = fanotify_mark(fanotify_fd, FAN_MARK_REMOVE,
+			    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
+			    AT_FDCWD, filename);
+	if (ret < 0) {
+		err("failed to remove fanotify mark "
+		    "from %s, error %d", filename, errno);
 	}
 	return ret;
 }

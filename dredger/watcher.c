@@ -19,11 +19,11 @@
 #include <sys/syslog.h>
 #include <stdarg.h>
 #include "fanotify.h"
-#include "fanotify-mark-syscall.h"
 #include "list.h"
 #include "logging.h"
 #include "dredger.h"
 #include "backend.h"
+#include "migrate.h"
 
 #define LOG_AREA "watcher"
 
@@ -101,7 +101,7 @@ void cleanup_migrate_event(struct migrate_event *event)
 	event->error = 0;
 }
 
-void cleanup_unmigrate_file(void *arg)
+void cleanup_unmigrate_thread(void *arg)
 {
 	struct migrate_event *event = arg;
 
@@ -110,49 +110,18 @@ void cleanup_unmigrate_file(void *arg)
 	free(event);
 }
 
-void * unmigrate_file(void *arg)
+void * unmigrate_thread(void *arg)
 {
 	struct migrate_event *event = arg;
 	int ret;
 
 	if (event->thr != (pthread_t)0)
-		pthread_cleanup_push(cleanup_unmigrate_file, (void *)event);
-	ret = open_backend(event->be, event->pathname);
-	if (ret) {
-		if (ret == ENOENT) {
-			info("backend file %s already un-migrated",
-			     event->pathname);
-			event->error = 0;
-		} else {
-			err("failed to open backend file %s, error %d",
-			    event->pathname, errno);
-			event->error = errno;
-			goto out;
-		}
-	} else {
-		info("start un-migration on file '%s'", event->pathname);
-		ret = unmigrate_backend(event->be, event->fa.fd);
-		if (ret < 0) {
-			err("failed to unmigrate file %s, error %d",
-			    event->pathname, ret);
-			event->error = ret;
-		} else {
-			info("finished un-migration on file '%s'",
-			     event->pathname);
-			event->error = 0;
-		}
-		close_backend(event->be);
+		pthread_cleanup_push(cleanup_unmigrate_thread, (void *)event);
+
+	ret = unmigrate_file(event->be, event->fa.fd, event->pathname);
+	if (!ret) {
+		ret = unmonitor_file(event->fanotify_fd, event->pathname);
 	}
-	if (!event->error) {
-		ret = fanotify_mark(event->fanotify_fd, FAN_MARK_REMOVE,
-				    FAN_ACCESS_PERM|FAN_EVENT_ON_CHILD,
-				    AT_FDCWD, event->pathname);
-		if (ret < 0) {
-			err("failed to remove fanotify mark "
-			    "from %s, error %d", event->pathname, errno);
-		}
-	}
-out:
 	pthread_cleanup_pop(1);
 	return NULL;
 }
@@ -231,7 +200,7 @@ void * watch_fanotify(void * arg)
 			continue;
 		}
 		ctx->event = NULL;
-		ret = pthread_create(&event->thr, NULL, unmigrate_file,
+		ret = pthread_create(&event->thr, NULL, unmigrate_thread,
 				     event);
 		if (ret < 0) {
 			err("Failed to start thread, error %d", errno);

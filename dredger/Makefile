@@ -17,10 +17,9 @@ clean:
 $(PRG): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) -lpthread
 
-dredger.c: fanotify.h fanotify-init-syscall.h logging.h backend.h \
+dredger.c: fanotify.h fanotify-init-syscall.h backend.h \
 	watcher.h cli.h
-watcher.c: fanotify.h fanotify-mark-syscall.h list.h logging.h \
-	dredger.h backend.h
-migrate.c: logging.h migrate.h backend.h
+watcher.c: fanotify.h dredger.h backend.h
+migrate.c: migrate.h backend.h fanotify.h fanotify-mark-syscall.h
 backend.c: backend.h
-cli.c: logging.h backend.h dredger.h migrate.h cli.h
+cli.c: backend.h dredger.h migrate.h cli.h
