@@ -13,6 +13,9 @@
 #include <time.h>
 #include "list.h"
 #include "events.h"
+#include "logging.h"
+
+#define LOG_AREA "events"
 
 struct event_file {
 	struct list_head ef_next;
@@ -35,8 +38,7 @@ int insert_event(char *dirname, time_t dtime)
 
 	new_ef = malloc(sizeof(struct event_file));
 	if (!new_ef) {
-		fprintf(stderr, "%s: Cannot allocate memory, error %d\n",
-			dirname, errno);
+		err("%s: Cannot allocate memory, error %d", dirname, errno);
 		return -errno;
 	}
 	strcpy(new_ef->ef_path, dirname);
@@ -56,8 +58,7 @@ int insert_event(char *dirname, time_t dtime)
 	if (!d_ev) {
 		d_ev = malloc(sizeof(struct event_entry));
 		if (!d_ev) {
-			fprintf(stderr,"%s: failed to allocate event entry\n",
-				dirname);
+			err("%s: failed to allocate event entry", dirname);
 			return -ENOMEM;
 		}
 		INIT_LIST_HEAD(&d_ev->ee_next);
@@ -92,20 +93,20 @@ void list_events(void)
 
 	list_for_each_entry(tmp_ee, &event_list, ee_next) {
 		if (!gmtime_r(&tmp_ee->ee_time, &dtm)) {
-			fprintf(stderr, "%s: Cannot convert time, error %d\n",
-				tmp_ef->ef_path, errno);
+			err("%s: Cannot convert time, error %d",
+			    tmp_ef->ef_path, errno);
 			continue;
 		}
-		printf("%04d%02d%02d-%02d%02d%02d:\n",
-		       dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
-		       dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
+		dbg("%04d%02d%02d-%02d%02d%02d:",
+		    dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
+		    dtm.tm_hour, dtm.tm_min, dtm.tm_sec);
 		num_files = 0;
 		list_for_each_entry(tmp_ef, &tmp_ee->ee_entries, ef_next) {
 			num_files++;
-			printf("\t%s\n", tmp_ef->ef_path);
+			dbg("\t%s", tmp_ef->ef_path);
 		}
-		printf("%04d%02d%02d-%02d%02d%02d: %d entries\n",
-		       dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
-		       dtm.tm_hour, dtm.tm_min, dtm.tm_sec, num_files);
+		dbg("%04d%02d%02d-%02d%02d%02d: %d entries",
+		    dtm.tm_year + 1900, dtm.tm_mon, dtm.tm_mday,
+		    dtm.tm_hour, dtm.tm_min, dtm.tm_sec, num_files);
 	}
 }

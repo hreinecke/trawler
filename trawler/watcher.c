@@ -209,8 +209,8 @@ void * watch_dir(void * arg)
 				     in_ev->wd);
 				goto next;
 			}
-			printf("event %d: %x\n",
-			       in_ev->wd, in_ev->mask);
+			info("event %d: %x",
+			     in_ev->wd, in_ev->mask);
 			if (in_ev->mask & IN_CREATE)
 				op = "created";
 			else if (in_ev->mask & IN_DELETE)
@@ -226,7 +226,7 @@ void * watch_dir(void * arg)
 			else
 				op = "<unhandled>";
 			sprintf(path, "%s/%s", found_ew->ew_path, in_ev->name);
-			printf("\t%s %s %s\n", op, type, path);
+			info("\t%s %s %s", op, type, path);
 			if (in_ev->mask & IN_ISDIR) {
 				pthread_cleanup_push(release_tree_lock, NULL);
 				pthread_mutex_lock(&tree_mutex);

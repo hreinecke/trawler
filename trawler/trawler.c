@@ -68,8 +68,7 @@ int trawl_dir(char *dirname)
 	struct dirent *dirent;
 
 	if (stat(dirname, &dirst) < 0) {
-		fprintf(stderr, "Cannot open %s: error %d\n",
-			dirname, errno);
+		err("Cannot open %s: error %d", dirname, errno);
 		return 0;
 	}
 	if (difftime(dirst.st_atime, dirst.st_mtime) < 0) {
@@ -91,8 +90,7 @@ int trawl_dir(char *dirname)
 
 	dirfd = opendir(dirname);
 	if (!dirfd) {
-		fprintf(stderr, "Cannot open directory %s: error %d\n",
-			dirname, errno);
+		err("Cannot open directory %s: error %d", dirname, errno);
 		return 0;
 	}
 	while ((dirent = readdir(dirfd))) {
@@ -102,8 +100,8 @@ int trawl_dir(char *dirname)
 			continue;
 		if(snprintf(fullpath, PATH_MAX, "%s/%s",
 			    dirname, dirent->d_name) >= PATH_MAX) {
-			fprintf(stderr, "%s/%s: pathname overflow\n",
-				dirname, dirent->d_name);
+			err("%s/%s: pathname overflow",
+			    dirname, dirent->d_name);
 		}
 		if ((dirent->d_type & DT_REG) || (dirent->d_type & DT_DIR))
 			num_files += trawl_dir(fullpath);
@@ -122,7 +120,7 @@ unsigned long parse_time(char *optarg)
 
 	now = test = time(NULL);
 	if (localtime_r(&now, &c) == 0) {
-		fprintf(stderr, "Cannot initialize time, error %d\n", errno);
+		err("Cannot initialize time, error %d", errno);
 		return 0;
 	}
 	p = optarg;
@@ -130,49 +128,49 @@ unsigned long parse_time(char *optarg)
 		val = strtoul(p, &e, 10);
 		if (p == e)
 			break;
-		printf("%s %s %lu\n", p, e, val);
+		dbg("%s %s %lu", p, e, val);
 		if (!p) {
 			ret = val;
 			break;
 		}
 		switch (*e) {
 		case 'Y':
-			printf("mon: %d %lu\n", c.tm_mon, val);
+			dbg("mon: %d %lu", c.tm_mon, val);
 			c.tm_year += val;
 			break;
 		case 'M':
-			printf("mon: %d %lu\n", c.tm_mon, val);
+			dbg("mon: %d %lu", c.tm_mon, val);
 			c.tm_mon += val;
 			break;
 		case 'D':
-			printf("day: %d %lu\n", c.tm_mday, val);
+			dbg("day: %d %lu", c.tm_mday, val);
 			c.tm_mday += val + 1;
 			break;
 		case 'h':
-			printf("hour: %d %lu\n", c.tm_hour, val);
+			dbg("hour: %d %lu", c.tm_hour, val);
 			c.tm_hour += val;
 			break;
 		case 'm':
-			printf("min: %d %lu\n", c.tm_min, val);
+			dbg("min: %d %lu", c.tm_min, val);
 			c.tm_min += val;
 			break;
 		case 's':
-			printf("sec: %d %lu\n", c.tm_sec, val);
+			dbg("sec: %d %lu", c.tm_sec, val);
 			c.tm_sec += val;
 			break;
 		default:
-			fprintf(stderr, "Invalid time specifier '%c'\n", *e);
+			err("Invalid time specifier '%c'", *e);
 			break;
 		}
 		p = e + 1;
 	}
 	test = mktime(&c);
 	if (test == (time_t)-1) {
-		fprintf(stderr, "Failed to convert time\n");
+		err("Failed to convert time '%s'", optarg);
 		ret = -1;
 	}
 	ret = difftime(test, now);
-	printf("Checking every %lu secs\n", (long)ret);
+	info("Checking every %lu secs", (long)ret);
 
 	return (long)ret;
 }
@@ -190,7 +188,7 @@ int main(int argc, char **argv)
 		case 'c':
 			checkinterval = parse_time(optarg);
 			if (checkinterval < 0) {
-				fprintf(stderr, "Invalid time '%s'\n", optarg);
+				err("Invalid time '%s'", optarg);
 				return 1;
 			}
 			break;
@@ -198,12 +196,12 @@ int main(int argc, char **argv)
 			realpath(optarg, init_dir);
 			break;
 		default:
-			fprintf(stderr, "usage: %s [-d <dir>]\n", argv[0]);
+			err("usage: %s [-d <dir>]", argv[0]);
 			return 1;
 		}
 	}
 	if (optind < argc) {
-		fprintf(stderr, "usage: %s [-d <dir>]\n", argv[0]);
+		err("usage: %s [-d <dir>]", argv[0]);
 		return EINVAL;
 	}
 	if ('\0' == init_dir[0]) {
@@ -211,16 +209,15 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(init_dir, "..")) {
 		if (chdir(init_dir) < 0) {
-			fprintf(stderr,
-				"Failed to change to parent directory: %d\n",
-				errno);
+			err("Failed to change to parent directory: %d",
+			    errno);
 			return errno;
 		}
 		sprintf(init_dir, ".");
 	}
 
 	if (!strcmp(init_dir, ".") && !getcwd(init_dir, PATH_MAX)) {
-		fprintf(stderr, "Failed to get current working directory\n");
+		err("Failed to get current working directory");
 		return errno;
 	}
 
@@ -230,11 +227,11 @@ int main(int argc, char **argv)
 	start_watcher();
 
 	starttime = time(NULL);
-	printf("Starting at '%s'\n", init_dir);
+	info("Starting at '%s'", init_dir);
 	num_files = trawl_dir(init_dir);
 	endtime = time(NULL);
 	elapsed = difftime(endtime, starttime);
-	printf("Checked %d files in %f seconds\n", num_files, elapsed);
+	info("Checked %d files in %f seconds", num_files, elapsed);
 
 	list_events();
 
