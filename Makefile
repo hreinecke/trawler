@@ -1,18 +1,16 @@
 #
 #
 
-SUBDIRS = trawler dredger
+SUBDIRS = lib trawler dredger
 
 all: $(SUBDIRS)
 
 clean:
+	make -C lib clean
 	make -C trawler clean
 	make -C dredger clean
 
-trawler: FORCE
-	make -C $@
-
-dredger: FORCE
+$(SUBDIRS): FORCE
 	make -C $@
 
 FORCE:

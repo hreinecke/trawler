@@ -22,6 +22,7 @@
 #include "backend.h"
 #include "watcher.h"
 #include "cli.h"
+#include "cli-server.h"
 
 #define LOG_AREA "watcher"
 
